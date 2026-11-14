@@ -1,6 +1,6 @@
 {
   "name": "resilience-pipeline",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Resilience pipelines for TypeScript: retry, circuit breaker, timeout, hedging, rate limiting and typed errors. A Polly v8 API for Node, Bun, Deno, Workers and browsers. Zero dependencies.",
   "keywords": [
     "resilience",
@@ -36,6 +36,10 @@
   "homepage": "https://resilience-pipeline.ferhatyalcin.dev",
   "bugs": {
     "url": "https://github.com/ylcnfrht/resilience-pipeline/issues"
+  },
+  "funding": {
+    "type": "buymeacoffee",
+    "url": "https://buymeacoffee.com/ylcnfrht"
   },
   "author": {
     "name": "ylcnfrht",

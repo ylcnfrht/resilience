@@ -12,6 +12,7 @@ composed into one pipeline. A [Polly v8](https://www.pollydocs.org/) API for Nod
 [![zero dependencies](https://img.shields.io/badge/dependencies-0-5eead4)](package.json)
 [![types](https://img.shields.io/npm/types/resilience-pipeline?color=5eead4)](https://www.npmjs.com/package/resilience-pipeline)
 [![license](https://img.shields.io/npm/l/resilience-pipeline?color=5eead4)](LICENSE)
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-ffdd00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/ylcnfrht)
 
 [**Documentation**](https://resilience-pipeline.ferhatyalcin.dev) · [Quick start](https://resilience-pipeline.ferhatyalcin.dev/start/quick-start/) · [Playground](https://resilience-pipeline.ferhatyalcin.dev/playground/)
 
@@ -196,6 +197,10 @@ npm run check:size    # bundle-size budgets
 `REDIS_CLUSTER=host:port,…` also runs the Redis Cluster test. The docs site lives in [`site/`](site/) (`npm run dev` there); every code sample in it is type-checked at build time.
 
 resilience-pipeline is an independent TypeScript implementation inspired by Polly. It is not affiliated with the Polly project or the .NET Foundation.
+
+## Support
+
+If resilience-pipeline saves you an outage, you can [buy me a coffee](https://buymeacoffee.com/ylcnfrht) ☕. Issues, ideas and pull requests are just as welcome.
 
 ## License
 

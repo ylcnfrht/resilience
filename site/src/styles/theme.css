@@ -126,6 +126,11 @@ site-search button[data-open-modal] {
 /* Full-width search only from tablet up; on phones Starlight shows it icon-only. */
 @media (min-width: 50rem) {
   site-search button[data-open-modal] {
+    min-width: 13rem;
+  }
+}
+@media (min-width: 90rem) {
+  site-search button[data-open-modal] {
     min-width: 18rem;
   }
 }

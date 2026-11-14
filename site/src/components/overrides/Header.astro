@@ -21,7 +21,7 @@ const links = [
 
 <div class="header">
   <div class="title-wrapper sl-flex"><SiteTitle /></div>
-  <nav class="rp-topnav sl-hidden lg:sl-flex" aria-label="Sections">
+  <nav class="rp-topnav" aria-label="Sections">
     {links.map((l) => <a href={l.href} aria-current={l.match.some((m) => path.startsWith(m)) ? 'true' : undefined}>{l.label}</a>)}
   </nav>
   <div class="sl-flex print:hidden rp-search">{shouldRenderSearch && <Search />}</div>
@@ -76,7 +76,7 @@ const links = [
     color: #b45309;
   }
   /* Too little room next to the full search box on mid-size screens: icon only. */
-  @media (max-width: 72rem) {
+  @media (max-width: 90rem) {
     .rp-coffee span {
       position: absolute;
       width: 1px;
@@ -91,8 +91,15 @@ const links = [
     align-items: center;
   }
   .rp-topnav {
+    display: none;
     gap: 0.25rem;
     align-items: center;
+  }
+  /* Later than Starlight's lg (72rem): the scoped package name needs the room; the sidebar has the same links. */
+  @media (min-width: 76rem) {
+    .rp-topnav {
+      display: flex;
+    }
   }
   .rp-topnav a {
     color: var(--sl-color-gray-3);
@@ -118,7 +125,7 @@ const links = [
       justify-content: center;
     }
   }
-  @media (min-width: 72rem) {
+  @media (min-width: 76rem) {
     .header {
       display: grid;
       grid-template-columns: auto auto 1fr auto;

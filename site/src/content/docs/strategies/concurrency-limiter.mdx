@@ -1,0 +1,152 @@
+---
+title: Concurrency limiter (bulkhead)
+description: Cap how many executions run at once, queue a few with priorities and a queue timeout, and reject the rest fast with BulkheadRejectedError.
+sidebar:
+  order: 6
+---
+import BulkheadSimulator from '../../../components/BulkheadSimulator.tsx';
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+A concurrency limiter (a bulkhead) caps how many executions run at the same time. A few more can wait in a queue; everything beyond that is rejected at once. Use it to stop one slow dependency from taking all your sockets, DB connections or memory, and to shed load before it piles up. It does not limit calls *per second*: a fast dependency can still get thousands of calls a second. For that, use a [rate limiter](/strategies/rate-limiting/). If you don't know the right number, use the [adaptive concurrency limiter](/strategies/adaptive-concurrency/).
+
+<Tabs syncKey="builder">
+<TabItem label="ResiliencePipelineBuilder">
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addConcurrencyLimiter({ permitLimit: 10, queueLimit: 50, queueTimeout: '2s' })
+  .build();
+
+const res = await pipeline.execute(({ signal }) => fetch('https://api.example.com/report', { signal }));
+```
+</TabItem>
+<TabItem label="PipelineBuilder">
+```ts twoslash
+import { PipelineBuilder, concurrencyLimiterStrategy } from 'resilience-pipeline';
+
+const pipeline = new PipelineBuilder()
+  .add(concurrencyLimiterStrategy({ permitLimit: 10, queueLimit: 50, queueTimeout: '2s' }))
+  .build();
+```
+</TabItem>
+</Tabs>
+
+Shorthands: `addConcurrencyLimiter(10)` (10 running, no queue) and `addConcurrencyLimiter(10, 50)` (10 running, 50 queued). The same works for `concurrencyLimiterStrategy(10, 50)`.
+
+## How it works
+
+<BulkheadSimulator client:visible />
+
+1. A free permit (`active < permitLimit`): the execution runs right away.
+2. No free permit, room in the queue (`queued < queueLimit`): it waits. The queue is ordered by `priority` (lower runs first), FIFO within one priority.
+3. Queue full: the `overflow` policy decides who is rejected: the newcomer, or someone already waiting.
+4. When an execution finishes, its permit goes straight to the head of the queue. A waiter is never overtaken by a newcomer.
+
+A waiter leaves the queue when its `queueTimeout` expires (rejected, reason `'queue-timeout'`) or when its signal aborts (fails with the abort reason, not a rejection).
+
+The default `queueLimit` is 0. Waiting rarely helps an overloaded service: callers usually prefer a fast 503 to a slow one. Add a queue to absorb short bursts, and give it a `queueTimeout` so nobody waits longer than the caller would.
+
+### Overflow policies
+
+| `overflow` | When the queue is full |
+|---|---|
+| `'reject-new'` (default) | The newcomer is rejected (`reason: 'full'`). |
+| `'drop-oldest'` | The longest-waiting execution is rejected (`reason: 'dropped'`) and the newcomer takes its place. Good when stale requests are worthless (the client has likely given up). |
+| `'drop-lowest-priority'` | The newest waiter of the lowest priority is dropped, *only if* the newcomer outranks it (a strictly lower `priority` number). Otherwise the newcomer is rejected. |
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+// Paying customers jump the queue; under pressure, free-tier waiters are dropped first.
+const pipeline = new ResiliencePipelineBuilder()
+  .addConcurrencyLimiter({
+    permitLimit: 20,
+    queueLimit: 100,
+    queueTimeout: '1s',
+    priority: (ctx) => (ctx.properties.get('tier') === 'paid' ? 0 : 10),
+    overflow: 'drop-lowest-priority',
+  })
+  .build();
+
+await pipeline.execute(async () => 'ok', { properties: new Map([['tier', 'paid']]) });
+```
+
+## Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `permitLimit` | `number` | required | Max executions running at once. Integer ≥ 1. |
+| `queueLimit` | `number` | `0` | Max executions waiting for a permit. |
+| `queueTimeout` | `Duration` | no limit | Longest a queued execution waits before it is rejected with `reason: 'queue-timeout'`. Must be > 0. |
+| `priority` | `(context) => number` | `0` for all | Queue order: lower runs sooner (like a Unix nice value), FIFO within a priority. Only called when the execution has to queue. If it throws, the execution fails with that error. |
+| `overflow` | `'reject-new' \| 'drop-oldest' \| 'drop-lowest-priority'` | `'reject-new'` | Who is rejected when the queue is full (see above). |
+| `onRejected` | `(args: { context, retryAfter }) => void \| Promise<void>` | – | Called on every rejection. `retryAfter` is always `undefined` here. |
+| `name` | `string` | `'ConcurrencyLimiter'` | Strategy name, for telemetry and `getStrategy()`. |
+
+`Duration` is milliseconds or a string such as `'500ms'`, `'2s'`, `'1m'`.
+
+## Errors
+
+Every rejection is a `BulkheadRejectedError`:
+
+| Field | Value |
+|---|---|
+| `code` | `'BULKHEAD_FULL'` |
+| `reason` | `'full'` (no permit, no queue room), `'queue-timeout'` (waited `queueTimeout`), `'dropped'` (pushed out by `overflow`) |
+| `active`, `queued` | Running and waiting executions at the moment of rejection |
+| `retryAfter` | `undefined` |
+
+It extends `RateLimiterRejectedError`, so `isRateLimitError()` and `isRejection()` match it. The default retry predicate does not retry rejections; the default fallback predicate does handle them. The `/http` helpers map it to **503**, not 429: a full bulkhead is a capacity problem on your side, not the client sending too fast. See [error codes](/reference/error-codes/).
+
+```ts twoslash
+import { type ResiliencePipeline, BulkheadRejectedError } from 'resilience-pipeline';
+declare const pipeline: ResiliencePipeline;
+declare function generateReport(signal: AbortSignal): Promise<string>;
+// ---cut---
+try {
+  await pipeline.execute(({ signal }) => generateReport(signal));
+} catch (error) {
+  if (error instanceof BulkheadRejectedError) {
+    console.warn(`shed (${error.reason}): ${error.active} running, ${error.queued} queued`);
+  }
+}
+```
+
+## Events
+
+| Telemetry event | Callback | When |
+|---|---|---|
+| `OnRateLimiterRejected` | `onRejected` | An execution is rejected (any `reason`). |
+
+## Live state
+
+`active` and `queued` are readable on the strategy instance, e.g. for a health endpoint or a dashboard. `ResiliencePipelineRegistry.limiters()` lists every limiter of every registered pipeline.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, ConcurrencyLimiterStrategy } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder().addConcurrencyLimiter(10, 50).build();
+
+const limiter = pipeline.getStrategy<ConcurrencyLimiterStrategy<unknown>>('ConcurrencyLimiter');
+console.log(limiter?.active, limiter?.queued);
+```
+
+## Recipes and pitfalls
+
+<Aside type="caution" title="Put it outside the retry">
+Add the limiter **before** (outside) `addRetry()` and `addTimeout()` when the permit should cover the whole call, retries included. Inside the retry, each attempt competes for a permit, and a rejection ends the call: the default retry predicate skips rejections (`isRejection()`), because retrying into a full bulkhead only adds load.
+</Aside>
+
+- **One limiter per dependency.** A shared pipeline means a shared limit. Build one pipeline per downstream (or use a registry key per downstream) so a slow payments API can't starve the inventory API.
+- **Pair it with a timeout.** Permits are released only when the call ends. A call that hangs forever holds its permit forever. Add a [timeout](/strategies/timeout/) inside the limiter.
+- **Cancellation is free.** A queued caller whose signal aborts leaves the queue at once and never takes a permit.
+- **HTTP servers.** The `/http`, Fastify and Koa middlewares have a `concurrency` option that does this for incoming requests: see [load shedding](/guides/load-shedding/).
+
+## Related
+
+- [Adaptive concurrency](/strategies/adaptive-concurrency/): the same limiter with a self-tuning limit.
+- [Rate limiting](/strategies/rate-limiting/): limit calls per time window.
+- [Load shedding guide](/guides/load-shedding/)
+- [Typed errors](/concepts/typed-errors/)

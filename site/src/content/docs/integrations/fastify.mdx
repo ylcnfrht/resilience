@@ -1,0 +1,71 @@
+---
+title: Fastify
+description: A Fastify plugin for request deadlines that propagate to nested calls, load shedding, per-client rate limits and 504/503/429 responses.
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`fastifyResilience` gives every request the same inbound protection as the [Express and Hono middleware](/integrations/express-and-hono/): a deadline that propagates to every pipeline called underneath, load shedding, a rate limit with `RateLimit-*` headers, cancellation on client disconnect, and JSON `504`/`503`/`429`/`409`/`403` responses.
+
+```sh
+npm i resilience-pipeline fastify   # fastify >= 4 (optional peer dependency)
+```
+
+```ts
+import Fastify from 'fastify';
+import { getResilienceSignal } from 'resilience-pipeline';
+import { fastifyResilience } from 'resilience-pipeline/fastify';
+
+const app = Fastify();
+
+// Register and await it BEFORE declaring routes.
+await app.register(fastifyResilience, {
+  timeout: '5s',
+  concurrency: { permitLimit: 200, queueLimit: 100, queueTimeout: '1s' },
+  rateLimit: { key: (req) => req.ip, permitLimit: 100, window: '1m' },
+});
+
+app.get('/orders/:id', async (req) => {
+  // Aborted when the 5 s budget runs out or the client disconnects.
+  return db.orders.find((req.params as { id: string }).id, { signal: getResilienceSignal() });
+});
+
+await app.listen({ port: 3000 });
+```
+
+## Options
+
+The plugin takes `InboundOptions`, the same as the Express middleware: `timeout`, `concurrency`, `rateLimit`, `rateLimitHeaders`, `pipeline`. See the [options table](/integrations/express-and-hono/#options-inboundoptions). `rateLimit.key` receives the Fastify request.
+
+## How it hooks in
+
+- **`onRequest` hook.** Each request enters the pipeline (rate limit → concurrency → timeout) in `onRequest`. The slot is held until the raw response finishes or the connection closes.
+- **`onRoute` hook.** Fastify reaches your handler through body parsing and other async hooks, which can lose `AsyncLocalStorage` (any callback-based hook or connection pool does). The plugin wraps every route handler declared **after** it to re-enter the request's context, so `getResilienceSignal()` and nested pipelines still see the request deadline. That is why it must be registered, and awaited, before your routes.
+- **Encapsulation.** The plugin skips Fastify's encapsulation, like a `fastify-plugin` plugin. Its hooks land on the instance you register it on: on the root instance they cover the whole app; inside a plugin they cover that plugin's routes (and its children).
+- **Responses.** A rejection is sent with `reply.code(status).headers(…).send({ statusCode, error, message })`, plus `Retry-After` when known. Rate-limit headers are added to every response when a rate limiter is configured.
+- **Errors.** If the pipeline fails with something other than a resilience error before your handler started, it goes to Fastify through the hook's `next(error)`.
+
+Errors thrown by your handlers go to Fastify's error handler as usual. To map resilience errors raised downstream (an open circuit, a timeout), use [`describeResilienceError`](/integrations/express-and-hono/#status-mapping):
+
+```ts
+import { describeResilienceError } from 'resilience-pipeline/http';
+
+app.setErrorHandler((error, req, reply) => {
+  const d = describeResilienceError(error);
+  if (!d) return reply.send(error); // Fastify's default handling
+  if (d.retryAfter !== undefined) reply.header('retry-after', String(d.retryAfter));
+  return reply.code(d.httpStatus).send({ code: d.code, message: d.message });
+});
+```
+
+<Aside type="caution" title="Register before your routes">
+Routes declared before the plugin still get the timeout and limits (from `onRequest`), but their handlers aren't wrapped: after an async hook, `getResilienceSignal()` can return `undefined` and nested pipelines no longer inherit the deadline. `await app.register(fastifyResilience, …)` first.
+</Aside>
+
+## Related
+
+- [Express and Hono](/integrations/express-and-hono/): options table, status mapping, GraphQL/gRPC.
+- [Load shedding](/guides/load-shedding/)
+- [Context, signals and deadline propagation](/concepts/context-and-signals/)

@@ -1,0 +1,269 @@
+---
+title: From @nestjs/resilience
+description: Move @nestjs/resilience presets, decorators and policy objects to resilience-pipeline/nestjs, or run both side by side. Mapping and differences.
+sidebar:
+  order: 7
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+**Who this is for:** NestJS apps using `@nestjs/resilience` that need strategies it doesn't have (hedging, cache, lock, sliding-window or Redis-backed rate limits, adaptive concurrency, chaos), breaker state shared across instances, OpenTelemetry/Prometheus export, or Nest 10 and 11 support.
+
+The two packages put their decorators in different places. `@nestjs/resilience` decorates **entry points** (controllers, resolvers, message handlers, gateways) through a global interceptor, and offers policy objects for services. `resilience-pipeline/nestjs` decorates **provider methods** (services, repositories, API clients) and doesn't touch entry points. So a migration moves resilience one layer down, next to the call it protects. You don't have to move everything: the two can run in the same app (see [Using both](#using-both)).
+
+## Concept mapping
+
+### Module
+
+| @nestjs/resilience 0.0.3 | resilience-pipeline/nestjs |
+|---|---|
+| `ResilienceModule.forRoot({ presets })` | `ResilienceModule.forRoot({ pipelines })` |
+| a preset `{ timeout, retry, circuitBreaker, bulkhead, outboundRateLimit, fallback }` | a function `(builder) => builder.addRetry(…).addCircuitBreaker(…).addTimeout(…)` |
+| `defaults` (field defaults per stage) | no equivalent: set options per pipeline |
+| `forRootAsync({ useFactory, inject, imports })` | same (`useClass` / `useExisting` are not supported) |
+| `mapErrors: true` (transport errors) | an exception filter with `describeResilienceError()` (see [NestJS](/integrations/nestjs/#mapping-rejections-to-http-responses)) |
+| `isGlobal` | always global |
+
+### Decorators
+
+| @nestjs/resilience | resilience-pipeline/nestjs (on a provider method) |
+|---|---|
+| `@Resilience('carrier')` (preset) | `@UsePipeline('carrier')` |
+| `@Retry({ attempts: 3 })` (attempts include the first) | `@Retry({ maxRetryAttempts: 2 })` (retries only) |
+| `@Retry(5)` / `@Retry(false)` | `@Retry({ maxRetryAttempts: 4 })` / leave the decorator out |
+| `backoff: { delay, factor, maxDelay, jitter: 'full' }` | `{ backoffType: 'exponential', delay, factor, maxDelay, useJitter: 'full' }` |
+| `retryIf(error, attempt)` | `shouldHandle: ({ outcome, attemptNumber }) => …` |
+| `idempotent: true` | not needed: a provider method has no HTTP method; every decorated call is retried |
+| `@Timeout('1.5s')` (per attempt) | `@Timeout(1500)` or `@Timeout({ timeout: '1.5s' })`, below `@Retry` for per attempt |
+| `@CircuitBreaker({ failureRateThreshold: 50 })` | `@CircuitBreaker({ failureRatio: 0.5 })` |
+| `minimumCalls` | `minimumThroughput` |
+| `slidingWindow: { type: 'count', size: 20 }` | `samplingCount: 20` |
+| `slidingWindow: { type: 'time', size: '30s' }` | `samplingDuration: '30s'` |
+| `openDuration` | `breakDuration` |
+| `halfOpenMaxCalls` | `halfOpenMaxCalls` |
+| `recordIf(error)` | `shouldHandle: ({ outcome }) => …` |
+| `@CircuitBreaker('name')` (shared by name) | `@UsePipeline('name')` with a breaker in that pipeline |
+| `@Bulkhead({ maxConcurrent, maxQueue, queueTimeout })` | `@ConcurrencyLimit({ permitLimit, queueLimit, queueTimeout })` |
+| `@Fallback('method', { handleIf })` | `@Fallback({ fallbackAction, shouldHandle })` |
+| preset `outboundRateLimit: { limit, interval, maxWait }` | `@Resilience((b) => b.addFixedWindowRateLimiter({ permitLimit, window, queueTimeout }))`, or `@RateLimit({ tokenLimit, replenishmentPeriod })` |
+| `@Signal() signal: AbortSignal` | `getResilienceSignal()` inside the method |
+| inject `ResilienceContext` (`signal`, `attempt`) | `getResilienceContext()` (`signal`, `attemptNumber` from 0) |
+
+### Services, events, errors
+
+| @nestjs/resilience | resilience-pipeline |
+|---|---|
+| `ResilienceService.preset(name)` | inject `ResiliencePipelineRegistry`, `registry.getPipeline(name)` |
+| `ResilienceService.create(options, name)` | `new ResiliencePipelineBuilder({ name })…build()` |
+| `policy.execute(({ signal, attempt }) => …, { source })` | `pipeline.execute(({ signal, attemptNumber }) => …, { name })` |
+| `circuitBreakers()`, `circuitBreaker(name).state` | `registry.circuitBreakers()`, or a `CircuitBreakerStateProvider` |
+| `bulkheads()` | `registry.limiters()` |
+| `trip()` / `reset()` | `manualControl.isolate()` / `manualControl.close()` |
+| `ResilienceEvents.events$` (RxJS) | `onTelemetry((event) => …)` |
+| diagnostics channel `nestjs:resilience:<type>` | diagnostics channel `resilience-pipeline` (`TELEMETRY_CHANNEL`) |
+| `ResilienceTimeoutError` (`TIMEOUT`, 504) | `TimeoutRejectedError` (`TIMEOUT`, 504) |
+| `CircuitOpenError` (`CIRCUIT_OPEN`, 503) | `BrokenCircuitError` (`CIRCUIT_OPEN`, 503) |
+| `BulkheadFullError` (`BULKHEAD_FULL`, 503) | `BulkheadRejectedError` (`BULKHEAD_FULL`, 503) |
+| `OutboundRateLimitError` (`RATE_LIMITED`, 503) | `RateLimiterRejectedError` (`RATE_LIMITED`, **429**) |
+
+## Side by side
+
+### Module and a preset
+
+<Tabs syncKey="nest-resilience">
+<TabItem label="@nestjs/resilience">
+
+```ts
+import { ResilienceModule } from '@nestjs/resilience';
+
+ResilienceModule.forRoot({
+  defaults: { timeout: '5s', retry: { attempts: 3, backoff: { delay: '200ms', maxDelay: '2s' } } },
+  presets: {
+    carrier: {
+      timeout: '2s',
+      retry: { attempts: 2 },
+      circuitBreaker: { failureRateThreshold: 50, minimumCalls: 10, openDuration: '30s' },
+    },
+  },
+});
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts
+import { ResilienceModule } from 'resilience-pipeline/nestjs';
+
+ResilienceModule.forRoot({
+  pipelines: {
+    carrier: (b) =>
+      b
+        .addRetry({ maxRetryAttempts: 1, backoffType: 'exponential', delay: '200ms', maxDelay: '2s', useJitter: 'full' })
+        .addCircuitBreaker({ failureRatio: 0.5, minimumThroughput: 10, samplingCount: 20, breakDuration: '30s' })
+        .addTimeout('2s'),
+  },
+});
+```
+
+</TabItem>
+</Tabs>
+
+`attempts: 2` is one retry. `samplingCount: 20` reproduces their default window (the last 20 calls). The order of the calls is the order of the stages, outermost first: retry around the breaker around a timeout per attempt.
+
+### From the controller to the service
+
+<Tabs syncKey="nest-resilience">
+<TabItem label="@nestjs/resilience">
+
+```ts
+@Controller('shipping')
+export class ShippingController {
+  @Get('quotes')
+  @Resilience('carrier')
+  @Timeout('1.5s')
+  @Fallback('flatRateQuotes', { handleIf: (error) => error instanceof CircuitOpenError })
+  getQuotes(@Query('orderId') orderId: string, @Signal() signal: AbortSignal) {
+    return this.shippingService.getQuotes(orderId, signal);
+  }
+
+  flatRateQuotes() {
+    return this.shippingService.flatRateQuotes();
+  }
+}
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { isBrokenCircuitError } from 'resilience-pipeline';
+import { Fallback, UsePipeline, getResilienceSignal } from 'resilience-pipeline/nestjs';
+
+@Injectable()
+export class ShippingService {
+  @Fallback({
+    shouldHandle: ({ outcome }) => !outcome.ok && isBrokenCircuitError(outcome.error),
+    fallbackAction: () => FLAT_RATE_QUOTES,
+  })
+  @UsePipeline('carrier')
+  async getQuotes(orderId: string) {
+    const order = await this.orders.findOne(orderId);
+    return this.carrier.getQuotes(order, getResilienceSignal());
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+The controller calls `shippingService.getQuotes(orderId)` without decorators. The 1.5 s route-level timeout from the left has no direct equivalent on a shared pipeline: either give the route its own pipeline, or put an inbound deadline on the request with `resilienceMiddleware({ timeout })` from `resilience-pipeline/http`, which nested pipelines inherit.
+
+### Policy objects in services
+
+<Tabs syncKey="nest-resilience">
+<TabItem label="@nestjs/resilience">
+
+```ts
+@Injectable()
+export class RepricingService {
+  private readonly policy: ResiliencePolicy;
+
+  constructor(resilience: ResilienceService) {
+    this.policy = resilience.preset('carrier');
+  }
+
+  quote(order: Order) {
+    return this.policy.execute(({ signal }) => this.carrier.getQuotes(order, signal), {
+      source: 'RepricingService.quote',
+    });
+  }
+}
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { ResiliencePipelineRegistry, type ResiliencePipeline } from 'resilience-pipeline';
+
+@Injectable()
+export class RepricingService {
+  private readonly pipeline: ResiliencePipeline;
+
+  constructor(registry: ResiliencePipelineRegistry) {
+    this.pipeline = registry.getPipeline('carrier');
+  }
+
+  quote(order: Order) {
+    return this.pipeline.execute(({ signal }) => this.carrier.getQuotes(order, signal), {
+      name: 'RepricingService.quote',
+    });
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+As with presets, the named pipeline is one instance: the job and every `@UsePipeline('carrier')` method share its breaker.
+
+### Events
+
+<Tabs syncKey="nest-resilience">
+<TabItem label="@nestjs/resilience">
+
+```ts
+events.events$.subscribe((event) => {
+  if (event.type === 'circuit-open') logger.warn(`Circuit "${event.policy}" opened`);
+});
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts
+import { onTelemetry } from 'resilience-pipeline';
+
+const off = onTelemetry((event) => {
+  if (event.event === 'OnCircuitOpened') logger.warn(`Circuit "${event.source.pipelineName}" opened`);
+});
+// call off() in onModuleDestroy
+```
+
+</TabItem>
+</Tabs>
+
+## Using both
+
+The two packages solve different layers and don't interfere: `@nestjs/resilience` maps errors and retries safe requests at the edge, `resilience-pipeline` protects outbound calls in providers. Several export names collide (`ResilienceModule`, `Retry`, `Timeout`, `CircuitBreaker`, `Fallback`, `Resilience`), so alias one side:
+
+```ts
+import { ResilienceModule as EdgeResilienceModule, Timeout as RouteTimeout } from '@nestjs/resilience';
+import { ResilienceModule, UsePipeline } from 'resilience-pipeline/nestjs';
+```
+
+<Aside type="caution" title="Retry at one layer">
+A route retry of 3 attempts around a service retry of 3 attempts sends up to 9 calls to a dependency that is already struggling. When you add `resilience-pipeline` retries in a service, remove the retry from the route's preset (or set `@Retry(false)` there), and vice versa.
+</Aside>
+
+## Behavioural differences to watch
+
+- **Providers and controllers.** Our decorators work on both (method guards, pipes and interceptors are kept); theirs are ignored (with a warning) on providers. A request-scoped class with a resilience decorator fails at startup, because a pipeline per request would reset its breaker on every request.
+- **No HTTP-method rule.** Their retry only re-runs `GET`, `HEAD`, `OPTIONS` and GraphQL queries unless you say `idempotent: true`. A provider method has no method to look at, so ours retries every decorated call. Don't put `@Retry` on a method that must not run twice, or call it through a pipeline with `execute(fn, { idempotent: false })`.
+- **One pipeline per decorated method.** An inline `@CircuitBreaker()` counts only that method's calls; there is no sharing by `name`. Share through `@UsePipeline(name)`.
+- **No field defaults.** Their `defaults` fill in any stage a decorator turns on. Here, an option you don't set takes the library default (Polly's: 3 retries, 2 s constant delay; breaker at 10% over 100 calls in 30 s). Set them in the pipeline.
+- **`@Timeout` takes milliseconds or options.** `@Timeout(1500)` or `@Timeout({ timeout: '1.5s' })`; a bare string like `@Timeout('1.5s')` is not accepted by the decorator (it is by `addTimeout()`).
+- **Fallback.** Theirs calls a method of the same class with the error and the `ExecutionContext`. Ours takes a `fallbackAction` (or `fallbackValue`) that receives `{ outcome, context }` and has no access to the instance; reach shared data through a module-level value or move the fallback into the method.
+- **Error mapping.** Theirs maps errors on every transport (HTTP, GraphQL, RPC, WebSocket) out of the box. Ours gives you `describeResilienceError()` with the code, HTTP status and `retryAfter`; you register the filter. A rate-limit rejection maps to 429 here, 503 there.
+- **Breaker defaults.** Theirs: 50% over the last 20 calls, at least 10, open 30 s. Ours, without options: 10% over at least 100 calls in a 30 s window, open 5 s.
+- **Version range.** `@nestjs/resilience` 0.0.3 needs Nest 12. `resilience-pipeline/nestjs` works with `@nestjs/common` and `@nestjs/core` 10 and later.
+
+## What you gain
+
+- Hedging, cache and coalescing, lock, sliding-window, partitioned and Redis-backed rate limits, adaptive concurrency, chaos, retry budget.
+- Breaker state shared across instances through Redis.
+- Typed errors with `settle()`, OpenTelemetry and Prometheus adapters, deadline propagation into nested calls.
+
+Related: [NestJS integration](/integrations/nestjs/), [Express and Hono](/integrations/express-and-hono/), [Circuit breaker](/strategies/circuit-breaker/).

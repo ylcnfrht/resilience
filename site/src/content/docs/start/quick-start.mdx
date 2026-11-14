@@ -1,0 +1,144 @@
+---
+title: Quick start
+description: Five minutes from a one-line retry to a typed, tested pipeline around an HTTP call.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Four steps, each building on the last. Every snippet on this page is type-checked against the library.
+
+## 1. Retry one call
+
+No pipeline needed for a single retry loop:
+
+```ts twoslash
+declare function getUser(id: string): Promise<{ id: string; name: string }>;
+// ---cut---
+import { retry, withTimeout, NonRetryableError } from 'resilience-pipeline';
+
+const user = await retry(() => getUser('42'), {
+  maxRetryAttempts: 5,
+  backoffType: 'exponential',
+  delay: '200ms',
+  useJitter: 'full',
+});
+
+const page = await withTimeout(({ signal }) => fetch('https://example.com', { signal }), '2s');
+```
+
+Throw `new NonRetryableError(err)` inside the callback to stop retrying at once; the caller receives `err`.
+The defaults already skip what retrying can't fix: 4xx client errors (except 408 and 429) and aborts.
+See [What counts as a failure](/concepts/failures/).
+
+## 2. A pipeline for an HTTP call
+
+When several strategies must cooperate, build a pipeline once and reuse it. Reuse matters: the circuit breaker's
+state lives in the pipeline.
+
+```ts twoslash title="orders-client.ts"
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+class HttpError extends Error {
+  constructor(readonly status: number) {
+    super(`HTTP ${status}`);
+  }
+}
+
+const ordersApi = new ResiliencePipelineBuilder({ name: 'orders-api' })
+  .addRetry({ maxRetryAttempts: 3, backoffType: 'exponential', delay: '200ms', useJitter: true })
+  .addCircuitBreaker({ failureRatio: 0.5, minimumThroughput: 20, samplingDuration: '30s', breakDuration: '15s' })
+  .addTimeout('2s')
+  .build();
+
+export async function getOrder(id: string) {
+  return ordersApi.execute(async ({ signal }) => {
+    const res = await fetch(`https://orders.internal/orders/${id}`, { signal });
+    if (!res.ok) throw new HttpError(res.status);
+    return res.json() as Promise<{ id: string; total: number }>;
+  });
+}
+```
+
+What this does:
+
+- **Order matters.** The first strategy added is the outermost. Retry wraps the breaker, which wraps the timeout,
+  so *each attempt* gets 2 s and is counted by the breaker. Reversing the order changes the behaviour; see
+  [Pipelines and strategy order](/concepts/pipelines/).
+- **`HttpError` has a `status`.** The default predicates read it: a 503 is retried and counted by the breaker, a 404
+  is neither.
+- **`signal` is passed to `fetch`.** The timeout works by aborting it. Without it, the request keeps running after
+  the pipeline has given up.
+
+## 3. Typed errors with `settle`
+
+`execute()` throws. `settle()` returns an outcome whose error type lists everything the pipeline can raise, and
+`Outcome.match()` requires a handler for each error code:
+
+```ts twoslash
+declare function findUser(id: string, signal: AbortSignal): Promise<{ id: string } | undefined>;
+declare const cached: { id: string };
+// ---cut---
+import { ResiliencePipelineBuilder, Outcome } from 'resilience-pipeline';
+
+class NotFound extends Error {
+  readonly code = 'NOT_FOUND' as const;
+}
+
+const users = new ResiliencePipelineBuilder()
+  .addTimeout('2s')
+  .addCircuitBreaker({ consecutiveFailures: 5 })
+  .build();
+
+const outcome = await users.settle(async ({ signal }) =>
+  (await findUser('42', signal)) ?? Outcome.fromError(new NotFound('user 42')),
+);
+
+const user = Outcome.match(outcome, {
+  ok: (u) => u,
+  NOT_FOUND: () => null,
+  TIMEOUT: () => cached,
+  CIRCUIT_OPEN: () => cached,
+  CIRCUIT_ISOLATED: () => cached,
+  UNEXPECTED: (e) => {
+    throw e.cause;
+  },
+});
+```
+
+Remove the `TIMEOUT` handler and the code no longer compiles. `UNEXPECTED` wraps anything the pipeline didn't
+produce: a bug, a 4xx. More in [Typed errors](/concepts/typed-errors/).
+
+## 4. Test it without waiting
+
+Every strategy reads time from a `TimeProvider`. Swap in `FakeTimeProvider` and move the clock by hand:
+
+```ts twoslash title="retry.test.ts"
+import assert from 'node:assert/strict';
+import { ResiliencePipelineBuilder, TimeoutRejectedError } from 'resilience-pipeline';
+import { FakeTimeProvider } from 'resilience-pipeline/testing';
+
+const time = new FakeTimeProvider();
+const pipeline = new ResiliencePipelineBuilder({ timeProvider: time })
+  .addRetry({ delay: '10s', maxRetryAttempts: 3 })
+  .addTimeout('1s')
+  .build();
+
+const done = assert.rejects(pipeline.execute(() => new Promise(() => {})), TimeoutRejectedError);
+await time.runAll(); // 4 timeouts + 3 delays = 34 virtual seconds, instantly
+await done;
+```
+
+<Aside type="caution">
+Attach the expectation (`assert.rejects`, `.catch`) **before** `runAll()` or `advance()`. The promise settles while
+timers fire; if nothing is listening yet, Node reports an unhandled rejection.
+</Aside>
+
+`time.advance('30s')` moves the clock step by step instead. More patterns in [Testing](/guides/testing/).
+
+## Next
+
+- [Pipelines and strategy order](/concepts/pipelines/)
+- [Context, signals and deadline propagation](/concepts/context-and-signals/)
+- [`createResilientFetch()`](/integrations/fetch/): step 2's defaults, packaged for `fetch`, with one breaker per host

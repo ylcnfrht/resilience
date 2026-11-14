@@ -1,0 +1,181 @@
+---
+title: Adaptive concurrency
+description: A concurrency limit that tunes itself from latency and failures (gradient2, vegas, aimd), so you never have to guess the magic number.
+sidebar:
+  order: 7
+---
+import AdaptiveLimitChart from '../../../components/AdaptiveLimitChart.tsx';
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+A fixed [concurrency limit](/strategies/concurrency-limiter/) needs a number, and every number is wrong somewhere: too low wastes capacity on a good day, too high lets requests pile up in the dependency's queue on a bad one. The adaptive limiter finds the number by watching the dependency. While latency stays flat, it raises the limit. When latency climbs or calls time out, the dependency is queueing, and the limit drops. This is how TCP congestion control (and Netflix's concurrency-limits) works. Use it in front of a dependency whose capacity changes (autoscaling, shared databases, noisy neighbours). Don't use it when you need a hard, contractual cap, such as a connection pool size: use a fixed limiter for that.
+
+<Tabs syncKey="builder">
+<TabItem label="ResiliencePipelineBuilder">
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addAdaptiveConcurrencyLimiter({ minLimit: 5, maxLimit: 200 })
+  .addTimeout('2s')
+  .build();
+
+await pipeline.execute(({ signal }) => fetch('https://search.internal/q?term=resilience', { signal }));
+```
+</TabItem>
+<TabItem label="PipelineBuilder">
+```ts twoslash
+import { PipelineBuilder, adaptiveConcurrencyLimiterStrategy, timeoutStrategy } from 'resilience-pipeline';
+
+const pipeline = new PipelineBuilder()
+  .add(adaptiveConcurrencyLimiterStrategy({ minLimit: 5, maxLimit: 200 }))
+  .add(timeoutStrategy('2s'))
+  .build();
+```
+</TabItem>
+</Tabs>
+
+## How it works
+
+<AdaptiveLimitChart client:visible />
+
+Admission is the same as the fixed limiter: run if `inflight < limit`, else wait in a FIFO queue (up to `queueLimit`), else reject with `BulkheadRejectedError`. The difference is what happens after each call:
+
+1. The strategy measures the call's latency (`rtt`) and whether it was a **drop**, an outcome that signals overload (`shouldDrop`; by default timeouts, rejections and transient errors).
+2. It feeds that sample to the **algorithm**, which returns a new limit.
+3. The new limit is clamped to `[minLimit, maxLimit]`. If its whole-number value changed, `OnLimitChanged` fires and queued waiters are let in.
+
+Three guards keep the limit honest:
+
+- **Caller aborts are ignored.** A client that hung up says nothing about the dependency. A timeout abort does count (the call was too slow).
+- **One cut per round trip.** Calls admitted before the last cut ran under the old, higher limit. Their drops are expected, so they don't cut the limit again (as in TCP).
+- **No growth while app-limited.** If less than half the limit was in use, low latency proves nothing about higher concurrency, so the limit doesn't grow.
+
+The limit is fractional internally; `limit` reports whole permits.
+
+## Algorithms
+
+| Algorithm | Signal | Best for |
+|---|---|---|
+| `'gradient2'` (default) | Short-term latency vs a long-term baseline | General use. Handles latency that drifts slowly. |
+| `'vegas'` | Estimated queue size from the fastest latency seen | Dependencies with a stable no-load latency. Converges fast. |
+| `'aimd'` | Drops only, ignores latency | Dependencies with noisy latency. Needs a timeout to produce drops. |
+
+Pass a name for the defaults, or call the factory to tune it:
+
+```ts twoslash
+import { ResiliencePipelineBuilder, vegas } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addAdaptiveConcurrencyLimiter({ algorithm: vegas({ alpha: 2, beta: 4 }), initialLimit: 10 })
+  .build();
+```
+
+<Aside type="note">
+Algorithms are stateful. Give each limiter its own instance: `vegas()` once per strategy, not one shared object.
+</Aside>
+
+### `gradient2(options)`
+
+`gradient = tolerance × baseline / shortLatency`, clamped to `[0.5, 1]`. At 1 (latency within tolerance), the limit grows by `queueSize(limit)`; below 1, it shrinks in proportion. The new estimate is blended into the old one by `smoothing`. The baseline drops at once to any lower short-term latency, and rises slowly (over `longWindow` samples) only while latency is within tolerance. A plain long-term average would instead drift up to the overloaded latency under sustained overload, and the limit would creep up without bound. Samples with `rtt` of 0 (a coarse clock such as `Date.now()`) carry no latency signal and are ignored.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `tolerance` | `number` | `1.5` | How far short-term latency may exceed the baseline before the limit shrinks. ≥ 1. |
+| `shortWindow` | `number` | `10` | Samples in the short-term latency EMA. |
+| `longWindow` | `number` | `600` | Samples in the long-term baseline EMA. |
+| `smoothing` | `number` | `0.2` | Weight of each new estimate, in (0, 1]. Lower is steadier. |
+| `queueSize` | `(limit) => number` | `Math.sqrt` | Headroom added on top of `limit × gradient`, so the limit can grow. |
+| `backoffRatio` | `number` | `0.9` | Multiplier on a drop, in (0, 1). |
+
+### `vegas(options)`
+
+TCP Vegas applied to concurrency. The fastest latency seen is the no-queue latency, so with `limit` calls in flight at latency `rtt`, about `limit × (1 − minRtt / rtt)` of them are queued inside the dependency. The limit moves to keep that queue between `alpha × log10(limit)` and `beta × log10(limit)`: below means unused capacity, above only adds latency. A drop cuts the limit by `beta × log10(limit)`.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `alpha` | `number` | `3` | Grow while the estimated queue is below `alpha × log10(limit)`. > 0. |
+| `beta` | `number` | `6` | Shrink when the estimated queue is above `beta × log10(limit)`. > `alpha`. |
+
+### `aimd(options)`
+
+Additive increase, multiplicative decrease (TCP Reno): `+increase / limit` per successful sample (so about `+increase` per round trip), `× backoffRatio` per drop.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `increase` | `number` | `1` | Added per round trip. > 0. |
+| `backoffRatio` | `number` | `0.9` | Multiplier on a drop, in (0, 1). |
+
+### Your own algorithm
+
+Any object with `onSample(sample) => number` works. The sample is `{ rtt, inflight, dropped, limit }`; return the next limit (the strategy clamps it, and ignores non-finite values).
+
+```ts twoslash
+import { type LimitAlgorithm, ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+// Halve on overload, otherwise creep up by one per call.
+const halving: LimitAlgorithm = {
+  onSample: ({ dropped, limit }) => (dropped ? limit / 2 : limit + 1),
+};
+
+const pipeline = new ResiliencePipelineBuilder().addAdaptiveConcurrencyLimiter({ algorithm: halving }).build();
+```
+
+## Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `algorithm` | `'gradient2' \| 'vegas' \| 'aimd' \| LimitAlgorithm` | `'gradient2'` | How the limit moves. |
+| `initialLimit` | `number` | `20` (clamped into `[minLimit, maxLimit]`) | Starting limit. An explicit value must lie within `[minLimit, maxLimit]`. |
+| `minLimit` | `number` | `1` | Floor. ≥ 1. |
+| `maxLimit` | `number` | `1000` | Ceiling. ≥ `minLimit`. |
+| `queueLimit` | `number` | `0` | Max executions waiting (FIFO) for a permit. |
+| `queueTimeout` | `Duration` | no limit | Longest a queued execution waits before it is rejected (`reason: 'queue-timeout'`). > 0. |
+| `shouldDrop` | `(args: { outcome, context }) => boolean` | `defaultShouldDrop` | Which outcomes signal overload. Default: timeouts, rejections and transient errors; not client errors (4xx) or aborts. |
+| `limitProvider` | `AdaptiveLimitProvider` | – | Exposes `limit`, `inflight` and `queued` outside the pipeline. |
+| `onLimitChanged` | `(args: { oldLimit, newLimit, sample }) => void` | – | Called when the whole-number limit changes. |
+| `onRejected` | `(args: { context, retryAfter }) => void \| Promise<void>` | – | Called on every rejection. `retryAfter` is `undefined`. |
+| `name` | `string` | `'AdaptiveConcurrencyLimiter'` | Strategy name. |
+
+## Reading the limit
+
+`AdaptiveLimitProvider` reads the live state of one limiter, e.g. for a health endpoint or a gauge. A provider attaches to a single limiter; attaching it twice throws. The strategy instance (`pipeline.getStrategy('AdaptiveConcurrencyLimiter')`) has the same `limit`, `inflight` and `queued` getters.
+
+```ts twoslash
+import { AdaptiveLimitProvider, ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const provider = new AdaptiveLimitProvider();
+const pipeline = new ResiliencePipelineBuilder()
+  .addAdaptiveConcurrencyLimiter({
+    limitProvider: provider,
+    onLimitChanged: ({ oldLimit, newLimit, sample }) => console.log(`limit ${oldLimit} -> ${newLimit} (rtt ${sample.rtt} ms)`),
+  })
+  .build();
+
+setInterval(() => console.log({ limit: provider.limit, inflight: provider.inflight, queued: provider.queued }), 10_000);
+```
+
+## Events and errors
+
+| Telemetry event | Callback | When |
+|---|---|---|
+| `OnLimitChanged` | `onLimitChanged` | The whole-number limit changed. Args: `{ oldLimit, newLimit, sample }`. |
+| `OnRateLimiterRejected` | `onRejected` | An execution was rejected. |
+
+Rejections are `BulkheadRejectedError` (`code: 'BULKHEAD_FULL'`, HTTP 503) with `reason` `'full'` or `'queue-timeout'`, and the `active` / `queued` counts. See the [concurrency limiter](/strategies/concurrency-limiter/#errors).
+
+## Recipes and pitfalls
+
+<Aside type="caution" title="Add a timeout inside it">
+A hung call never produces a sample, so the limiter can't learn from it. Put a [timeout](/strategies/timeout/) **after** (inside) the adaptive limiter: timeouts are the clearest overload signal, and `aimd` sees nothing else.
+</Aside>
+
+- **Set `maxLimit` to what you can afford.** The limiter protects the dependency, not your process. Keep `maxLimit` at or below your connection pool size.
+- **Custom drops.** If the dependency signals overload in a response (HTTP 429 or 503 returned as a value), say so with `shouldDrop: ({ outcome }) => !outcome.ok || outcome.result.status === 503`.
+- **Slower forever.** Both latency algorithms remember the fastest latency. If the dependency gets permanently slower (2× at low load), the limit settles lower. Restart or recreate the pipeline after such a change.
+
+## Related
+
+- [Concurrency limiter](/strategies/concurrency-limiter/): fixed limit, priorities, overflow policies.
+- [Load shedding guide](/guides/load-shedding/)
+- [Timeout](/strategies/timeout/)

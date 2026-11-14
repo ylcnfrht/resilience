@@ -1,0 +1,222 @@
+---
+title: Calling rate-limited APIs
+description: Stay under a third-party quota - honour Retry-After, limit on your side first, give each tenant its own share, and cap retries with a budget.
+sidebar:
+  order: 6
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+**The problem.** A CRM, payment or LLM API gives your API key a quota: 100 requests per 10 s, 10 000 tokens per minute. Go
+over it and you get `429 Too Many Requests`, often with a `Retry-After` header. The naive setup makes this worse:
+
+- **Retries burn the quota.** Every caller that gets a 429 retries after 200 ms, the retries get 429s too, and the quota
+  never recovers. Some APIs extend the penalty or suspend the key for that.
+- **One tenant starves the others.** A customer's bulk import uses the whole quota; every other customer's requests fail.
+- **Retry-After is ignored**, or obeyed blindly: a `Retry-After: 3600` that the caller sleeps through, holding a request open for an hour.
+
+The fix has four layers, and they work together:
+
+1. **Limit on your side** to the quota, so you rarely see a 429 at all.
+2. **Honour `Retry-After`** when you do, and block the local limiter for that long.
+3. **Partition** the limit per tenant, so one tenant can't use everyone's share.
+4. **Cap retries** with a time limit and a budget.
+
+## With createResilientFetch
+
+The fetch integration already does layer 2 for you: it retries 429 and 503, waits at least the `Retry-After` the response
+asks for (seconds or an HTTP date), and drains the discarded response. Add a time limit and a budget:
+
+```ts twoslash
+import { RetryBudget } from 'resilience-pipeline';
+import { createResilientFetch } from 'resilience-pipeline/fetch';
+
+const crmBudget = new RetryBudget({ ratio: 0.1 }); // retries add at most 10% to the request rate
+
+const crm = createResilientFetch({
+  name: 'crm',
+  totalTimeout: '30s',
+  retry: {
+    maxRetryAttempts: 4,
+    maxRetryTime: '20s', // a Retry-After that ends past this: return the 429 now instead of waiting
+    budget: crmBudget,
+  },
+});
+
+const res = await crm('https://api.crm.example/contacts?page=2');
+if (res.status === 429) {
+  // Retries exhausted, over the budget, or Retry-After too long: the last response is returned as is.
+}
+```
+
+Why `maxRetryTime`: the Retry-After delay is used as is (it is not capped by `maxDelay`). Without a limit, a
+`Retry-After: 120` makes the call sleep until `totalTimeout` aborts it with a `TimeoutRejectedError`. With
+`maxRetryTime`, a retry that would start too late isn't scheduled, and you get the 429 response back right away, which you can
+pass on to your own caller with its `Retry-After`.
+
+## A pipeline for your own client
+
+For an SDK or your own HTTP client, put the pieces together yourself:
+
+```ts twoslash title="crm.ts"
+import { RateLimiterControl, ResiliencePipelineBuilder, RetryBudget } from 'resilience-pipeline';
+import { parseRetryAfter } from 'resilience-pipeline/fetch';
+
+/** What the client throws for an error response. `retryAfter` is in ms. */
+class HttpError extends Error {
+  readonly status: number;
+  readonly retryAfter: number | undefined;
+  constructor(status: number, retryAfter?: number) {
+    super(`HTTP ${status}`);
+    this.status = status;
+    this.retryAfter = retryAfter;
+  }
+}
+
+const quota = new RateLimiterControl();
+
+export const crm = new ResiliencePipelineBuilder({ name: 'crm' })
+  .addRetry({
+    maxRetryAttempts: 4,
+    delay: '1s',
+    backoffType: 'exponential',
+    useJitter: 'full',
+    maxRetryTime: '20s',
+    budget: new RetryBudget({ ratio: 0.1 }),
+  })
+  // The quota is 100 per 10 s. Wait up to 5 s for a permit rather than failing at once.
+  .addSlidingWindowRateLimiter({ permitLimit: 100, window: '10s', queueTimeout: '5s', queueLimit: 500, control: quota })
+  .addTimeout('10s')
+  .build();
+
+export async function crmGet(path: string, signal: AbortSignal): Promise<unknown> {
+  const res = await fetch(`https://api.crm.example${path}`, { signal });
+  if (!res.ok) {
+    const retryAfter = parseRetryAfter(res.headers.get('retry-after'));
+    // The server knows the quota better than we do: hold every other call back too.
+    if (res.status === 429 && retryAfter !== undefined) quota.block(retryAfter);
+    await res.body?.cancel();
+    throw new HttpError(res.status, retryAfter);
+  }
+  return res.json();
+}
+
+const contacts = await crm.execute(({ signal }) => crmGet('/contacts', signal));
+```
+
+How the layers interact:
+
+- **The local limiter comes after the retry**, so every retry takes a permit too. A retry can't jump the quota.
+- **`retryAfter` on the error** is read by the retry strategy (`respectRetryAfter`, on by default): the delay before the
+  next attempt is at least that long. Any handled error with a numeric `retryAfter` in ms works.
+- **`quota.block(retryAfter)`** makes the local limiter treat the quota as used up until the server's reset. Calls queue
+  for it (up to `queueTimeout`) instead of each one making its own trip to a 429.
+- **Local rejections are not retried.** When the limiter can't grant a permit within `queueTimeout`, the call fails with
+  `RateLimiterRejectedError` (`code: 'RATE_LIMITED'`, with `retryAfter`). The default retry predicate never retries
+  rejections: waiting is the limiter's job (`queueTimeout`), and retrying would only queue the call again.
+- **4xx other than 408 and 429 aren't retried.** The default predicate reads `status` from the error.
+
+<Aside type="tip" title="Pick the algorithm the API uses">
+Match the provider's documented algorithm, or you'll be under your own limit and over theirs. "100 per 10 seconds" is a
+window: `addSlidingWindowRateLimiter` (or `addFixedWindowRateLimiter` if the whole count resets at once). "Bursts of 20,
+refilling 5 per second" is a token bucket: `addRateLimiter({ tokenLimit: 20, replenishmentPeriod: '1s', tokensPerPeriod: 5 })`.
+"No more than 10 per second, evenly" is `minTime: '100ms'`. Leave 5–10% headroom: their clock and yours disagree.
+</Aside>
+
+## Quotas measured in cost, not calls
+
+LLM and GraphQL APIs often meter tokens or points per call. Give each call a weight with `permits`:
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+declare function complete(prompt: string, maxTokens: number, signal: AbortSignal): Promise<string>;
+// ---cut---
+const COST = 'cost';
+
+const llm = new ResiliencePipelineBuilder<string>({ name: 'llm' })
+  .addRetry({ maxRetryAttempts: 3, delay: '2s', backoffType: 'exponential', useJitter: true })
+  // 90 000 tokens per minute; a call is charged its prompt + max output estimate.
+  .addSlidingWindowRateLimiter({ permitLimit: 90_000, window: '1m', queueTimeout: '10s', permits: (ctx) => ctx.properties.get(COST) as number })
+  .build();
+
+const prompt = 'Classify this ticket: …';
+const maxTokens = 500;
+const label = await llm.execute(({ signal }) => complete(prompt, maxTokens, signal), {
+  properties: new Map([[COST, Math.ceil(prompt.length / 4) + maxTokens]]),
+});
+```
+
+A weight above `permitLimit` can never fit and fails at once with `PermitLimitExceededError`. Waiters are served first come,
+first served, so one big call isn't overtaken forever by small ones.
+
+## One share per tenant
+
+When your own customers trigger the calls, a single shared limit lets one of them use it all. Partition it: one limiter per
+tenant, created on first use, with the API's overall limit behind it.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, TokenBucketStrategy } from 'resilience-pipeline';
+declare function search(query: string, signal: AbortSignal): Promise<unknown[]>;
+declare const tenantId: string;
+// ---cut---
+const TENANT = 'tenant';
+
+const searchApi = new ResiliencePipelineBuilder<unknown[]>({ name: 'search-api' })
+  // Each tenant: bursts of 20, then 5 per second.
+  .addPartitionedRateLimiter({
+    partitionKey: (ctx) => String(ctx.properties.get(TENANT)),
+    limiter: (_tenant, s) => new TokenBucketStrategy({ tokenLimit: 20, replenishmentPeriod: '1s', tokensPerPeriod: 5, queueTimeout: '1s' }, s),
+  })
+  // The whole API key: 1 000 per minute.
+  .addSlidingWindowRateLimiter({ permitLimit: 1_000, window: '1m', queueTimeout: '5s' })
+  .addTimeout('5s')
+  .build();
+
+const hits = await searchApi.execute(({ signal }) => search('red shoes', signal), {
+  properties: new Map([[TENANT, tenantId]]),
+});
+```
+
+The per-tenant limiter comes first, so a tenant over its share is rejected before it takes a permit from the shared quota.
+Size the shares so that their sum can exceed the overall limit (not every tenant is busy at once), but no single tenant can
+reach it.
+
+Partitions unused for `idleTimeout` (default 10 minutes) are dropped, which resets their count; keep it longer than the
+limiter's window. With several instances, use `redisPartitionLimiter` so the shares hold across the fleet (see
+[running several instances](/guides/multi-instance/)).
+
+## Retry budgets
+
+`maxRetryAttempts: 3` means "up to 4× the load" when the API is struggling, exactly when it can least take it. A
+`RetryBudget` caps retries relative to traffic: with `ratio: 0.1`, retries add at most 10% to the requests sent in the
+last `window` (default 10 s), plus `minRetriesPerSecond` (default 10) so a quiet service can still retry.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, RetryBudget } from 'resilience-pipeline';
+// ---cut---
+// One budget per dependency, shared by every pipeline that calls it.
+const crmBudget = new RetryBudget({ ratio: 0.1, minRetriesPerSecond: 2 });
+
+const reads = new ResiliencePipelineBuilder({ name: 'crm-reads' }).addRetry({ budget: crmBudget, delay: '500ms' }).build();
+const writes = new ResiliencePipelineBuilder({ name: 'crm-writes' }).addRetry({ budget: crmBudget, delay: '1s' }).build();
+
+crmBudget.stats(); // { requests, retries } in the current window
+```
+
+When the budget refuses a retry, the last outcome is returned (the 429 error) and `OnRetryBudgetExhausted` is reported.
+The budget is per process; that's fine, since the ratio holds for the fleet if it holds for each instance.
+
+## Checklist
+
+- Local limiter matching the provider's algorithm, with headroom, `queueTimeout` and a `queueLimit`.
+- Retry outside the limiter; `retryAfter` on your errors; `maxRetryTime` so a long `Retry-After` fails fast.
+- `RateLimiterControl.block()` on a 429 with `Retry-After`.
+- Weights for cost-metered APIs; partitions per tenant; Redis-backed limits when you run several instances.
+- One `RetryBudget` per dependency.
+
+## Related
+
+- [Rate limiting](/strategies/rate-limiting/): every algorithm and option
+- [Retry](/strategies/retry/): `respectRetryAfter`, `maxRetryTime`, budgets
+- [fetch](/integrations/fetch/), [axios](/integrations/axios/)
+- [Load shedding](/guides/load-shedding/): the other side, limiting what calls *you*

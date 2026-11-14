@@ -1,0 +1,101 @@
+---
+title: Prometheus
+description: Expose strategy events, execution and attempt latency histograms and circuit breaker state for every pipeline through prom-client.
+sidebar:
+  order: 10
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`instrumentPrometheus()` turns the telemetry of **every pipeline in the process** into Prometheus metrics with [prom-client](https://github.com/siimon/prom-client). One call at startup; serve the registry as usual.
+
+```sh
+npm i resilience-pipeline prom-client   # prom-client >= 14 (optional peer dependency)
+```
+
+```ts
+import express from 'express';
+import { register } from 'prom-client';
+import { instrumentPrometheus } from 'resilience-pipeline/prometheus';
+
+instrumentPrometheus(); // once, at startup
+
+const app = express();
+app.get('/metrics', async (_req, res) => {
+  res.set('content-type', register.contentType);
+  res.end(await register.metrics());
+});
+```
+
+## Metrics
+
+| Metric | Type | Labels | What |
+|---|---|---|---|
+| `resilience_strategy_events_total` | counter | `pipeline`, `strategy`, `event` | Retries, timeouts, circuit transitions, rejections, fallbacks, cache hits… |
+| `resilience_pipeline_duration_seconds` | histogram | `pipeline`, `outcome` | One sample per execution, retries and delays included. |
+| `resilience_attempt_duration_seconds` | histogram | `pipeline`, `attempt`, `outcome` | One sample per call of the callback (first call, retries, hedged attempts). |
+| `resilience_circuit_state` | gauge | `pipeline`, `strategy` | `0` closed, `1` half-open, `2` open, `3` isolated. |
+
+- `outcome` is `success` or `failure`; `attempt` is the attempt number (`0` for the first call), capped at `10` (the 10th retry or later), so a large `maxRetryAttempts` can't create unbounded series.
+- `resilience_circuit_state` keeps the 1000 most recently changed circuits; older series (e.g. per-host pipelines that `createResilientFetch` dropped) are removed.
+- `event` is the telemetry event name (`OnRetry`, `OnTimeout`, `OnCircuitOpened`, `OnRateLimiterRejected`…). The per-call events (`OnPipelineExecuting`, `OnStrategyExecuted`, `OnPipelineExecuted`, `OnExecutionAttempt`) aren't counted; they feed the histograms. All names: [events catalog](/reference/events/).
+- The circuit gauge gets a series once a breaker changes state (or syncs from a shared store).
+- Your extra labels (see `labelNames`) are added to the counter and both histograms, not to the gauge.
+
+## Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `registry` | `Registry` | prom-client's global `register` | Registry the metrics are registered in. |
+| `prefix` | `string` | `'resilience_'` | Metric name prefix. |
+| `buckets` | `number[]` | `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30]` | Histogram buckets, in seconds. |
+| `durations` | `boolean` | `true` | Register and record the two duration histograms. |
+| `labelNames` | `string[]` | `[]` | Names of extra labels. prom-client needs them up front. |
+| `labels` | `(event) => Record<string, string \| number>` | none | Values of the extra labels, from the telemetry event (`context`, `source`, `args`). |
+
+```ts
+import { Registry } from 'prom-client';
+
+const registry = new Registry();
+instrumentPrometheus({
+  registry,
+  prefix: 'app_resilience_',
+  buckets: [0.01, 0.05, 0.1, 0.5, 1, 5],
+  labelNames: ['tenant'],
+  labels: ({ context }) => ({ tenant: String(context.properties.get('tenant') ?? 'none') }),
+});
+```
+
+`instrumentPrometheus()` returns a function that stops recording. The metrics stay registered.
+
+## Queries
+
+```txt
+# Error ratio per pipeline
+sum by (pipeline) (rate(resilience_pipeline_duration_seconds_count{outcome="failure"}[5m]))
+  / sum by (pipeline) (rate(resilience_pipeline_duration_seconds_count[5m]))
+
+# p99 latency per pipeline
+histogram_quantile(0.99, sum by (le, pipeline) (rate(resilience_pipeline_duration_seconds_bucket[5m])))
+
+# Retries per second, and attempts per execution
+sum by (pipeline) (rate(resilience_strategy_events_total{event="OnRetry"}[5m]))
+sum by (pipeline) (rate(resilience_attempt_duration_seconds_count[5m]))
+  / sum by (pipeline) (rate(resilience_pipeline_duration_seconds_count[5m]))
+
+# Open circuits (alert on this)
+resilience_circuit_state >= 2
+```
+
+<Aside type="caution" title="Gotchas">
+- **Call it once per registry.** A second call with the same registry and prefix fails: prom-client refuses to register a metric name twice, and the stop function doesn't unregister. In tests, pass a fresh `Registry`.
+- **Label cardinality.** `pipeline` is the pipeline name. The [fetch integration](/integrations/fetch/) names its per-host pipelines `<name>/<origin>`, one series per host. Keep `labels` values to a small set.
+</Aside>
+
+Unlike the [OpenTelemetry integration](/integrations/opentelemetry/), the histograms have no `error.type` label; failures are only split by `outcome`.
+
+## Related
+
+- [OpenTelemetry](/integrations/opentelemetry/), [createStats](/integrations/stats/)
+- [Telemetry model](/concepts/telemetry/)
+- [Migrating from opossum](/migration/opossum/) (opossum-prometheus users)

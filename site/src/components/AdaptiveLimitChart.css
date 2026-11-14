@@ -1,0 +1,26 @@
+.rp-alc-toggle { align-self: end; padding-bottom: 0.3rem; grid-column: span 2; }
+.rp-alc-fig { margin: 0; }
+.rp-alc-fig svg { width: 100%; height: auto; display: block; }
+.rp-alc .rp-alc-grid { stroke: var(--sl-color-gray-5); stroke-width: 1; stroke-dasharray: 2 4; }
+.rp-alc .rp-alc-axis { fill: var(--sl-color-gray-3); font-size: 11px; font-family: var(--sl-font-mono); }
+.rp-alc-slow { fill: color-mix(in srgb, var(--rp-amber) 6%, transparent); }
+.rp-alc .rp-alc-slow-label { fill: var(--rp-amber); }
+.rp-alc-inflight { fill: color-mix(in srgb, var(--rp-accent-2) 22%, transparent); stroke: none; }
+.rp-alc-limit { fill: none; stroke: var(--sl-color-accent); stroke-width: 2; stroke-linejoin: round; }
+.rp-alc-cap { fill: none; stroke: var(--rp-amber); stroke-width: 1.5; stroke-dasharray: 5 4; }
+.rp-alc-lat { fill: none; stroke: var(--rp-accent-2); stroke-width: 1.25; }
+.rp-alc-timeout { stroke: var(--rp-red); stroke-width: 1; stroke-dasharray: 4 3; }
+.rp-alc .rp-alc-timeout-label { fill: var(--rp-red); }
+.rp-alc-drop { stroke: var(--rp-red); stroke-width: 1.5; }
+.rp-alc-legend { list-style: none; padding: 0; margin: 0.35rem 0 0; display: flex; flex-wrap: wrap; gap: 0.25rem 0.9rem; font-size: 0.75rem; color: var(--d-muted); }
+.rp-alc-legend li { margin: 0; white-space: nowrap; }
+.rp-alc-key { display: inline-block; vertical-align: middle; margin: 0 0.3rem 0 0; width: 0.9rem; height: 0; border-top: 2px solid; }
+.rp-alc-key.is-limit { border-color: var(--sl-color-accent); }
+.rp-alc-key.is-inflight { height: 0.6rem; border: 0; background: color-mix(in srgb, var(--rp-accent-2) 30%, transparent); }
+.rp-alc-key.is-cap { border-top: 2px dashed var(--rp-amber); }
+.rp-alc-key.is-lat { border-top: 1px solid var(--rp-accent-2); }
+.rp-alc-key.is-drop { width: 2px; height: 0.6rem; border: 0; background: var(--rp-red); }
+.rp-alc-stats { margin-top: 0.75rem; }
+.rp-alc-note { font-size: 0.8rem; color: var(--d-muted); margin: 0.75rem 0 0; }
+.rp-alc-code { display: block; margin-top: 0.6rem; font-size: 0.75rem; overflow-x: auto; white-space: pre; padding: 0.4rem 0.6rem; border-radius: 6px; background: var(--sl-color-black); }
+@media (max-width: 560px) { .rp-alc .rp-alc-axis { font-size: 17px; } }

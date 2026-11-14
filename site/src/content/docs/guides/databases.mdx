@@ -1,0 +1,223 @@
+---
+title: Databases (Postgres)
+description: Timeouts that really cancel Postgres queries, retrying whole transactions on serialization failures and deadlocks, and why the primary DB gets no breaker.
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+**The problem.** You wrap a query in a 1 s timeout. The timeout fires, the caller gets a `TimeoutRejectedError`, and the
+query keeps running on the server for another 30 seconds, holding a pool connection and its locks. Under load, every
+timed-out request leaves one of these behind, the pool runs dry, and a slow query turns into an outage.
+
+Two other database failures need care too:
+- **Serialization failures and deadlocks** (`40001`, `40P01`) are normal under `SERIALIZABLE` or with hot rows. Postgres
+  aborts the transaction and expects you to run it again. Retrying the last statement is wrong; the whole transaction has to run again.
+- **Pool exhaustion.** By default `pool.connect()` waits forever for a free connection, ignoring every timeout above it.
+
+This guide builds a `transaction()` helper and a pipeline that handle all three. A runnable demo is
+`examples/7-database.ts` in the repository (`node examples/7-database.ts` against a local Postgres).
+
+## Why a plain timeout doesn't stop the query
+
+`pg` (like `mysql2` and most drivers) does not accept an `AbortSignal`. The pipeline's timeout aborts `context.signal` and
+returns at once, but nobody tells the server. The query only stops when it finishes or when someone sends Postgres a cancel request.
+
+```ts
+// Looks right, isn't: the caller gets TimeoutRejectedError after 300 ms,
+// the server runs pg_sleep(3) to the end on a pool connection.
+const naive = new ResiliencePipelineBuilder().addTimeout(300).build();
+await naive.execute(() => pool.query('select pg_sleep(3)'));
+```
+
+The fix: when the signal aborts, cancel the backend that runs the query with `pg_cancel_backend(pid)`. The cancel goes over
+**another** connection, because the query's own connection is busy, and the main pool may be exhausted at exactly that moment.
+
+## The `transaction()` helper
+
+```ts title="db.ts"
+import pg from 'pg';
+import { NonRetryableError } from 'resilience-pipeline';
+
+export const pool = new pg.Pool({
+  max: 10,
+  connectionTimeoutMillis: 2_000,              // fail fast when the pool is exhausted, instead of queueing forever
+  idle_in_transaction_session_timeout: 10_000, // server kills sessions a crashed caller left in BEGIN
+});
+// Cancels need a connection that is free when the main pool is not.
+const cancelPool = new pg.Pool({ max: 2 });
+
+type Isolation = 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABLE';
+const CONNECTION_LOST = new Set(['08000', '08003', '08006', '57P01', 'ECONNRESET', 'ETIMEDOUT']);
+
+/**
+ * Runs `fn` in a transaction. When `signal` aborts (timeout, caller gone, request deadline),
+ * the running statement is cancelled on the server, not just abandoned.
+ */
+export async function transaction<T>(
+  signal: AbortSignal,
+  fn: (client: pg.PoolClient) => Promise<T>,
+  isolation: Isolation = 'READ COMMITTED',
+): Promise<T> {
+  const client = await pool.connect(); // ignores the signal: bounded by connectionTimeoutMillis
+  // processID exists at runtime; @types/pg doesn't declare it.
+  const pid = (client as unknown as { processID: number }).processID;
+  let cancelling: Promise<unknown> | undefined;
+  const cancel = () => {
+    cancelling = cancelPool.query('select pg_cancel_backend($1)', [pid]).catch(() => {});
+  };
+  try {
+    signal.throwIfAborted(); // the deadline passed while we waited for a connection
+    signal.addEventListener('abort', cancel, { once: true });
+    await client.query(`begin isolation level ${isolation}`);
+    await client.query('set local statement_timeout = 5000'); // server-side net, even if this process dies
+    const result = await fn(client);
+    try {
+      await client.query('commit');
+    } catch (e) {
+      // Connection lost during COMMIT: it may or may not have committed. Running it again could apply it twice.
+      if (CONNECTION_LOST.has((e as { code?: string }).code ?? '')) throw new NonRetryableError(e);
+      throw e;
+    }
+    return result;
+  } catch (e) {
+    await client.query('rollback').catch(() => {});
+    throw e;
+  } finally {
+    signal.removeEventListener('abort', cancel);
+    // Never return the connection while a cancel for its backend is in flight:
+    // it would cancel whatever the next borrower runs.
+    await cancelling;
+    client.release();
+  }
+}
+```
+
+What each part is for:
+
+| Line | Why |
+|---|---|
+| `connectionTimeoutMillis` | `pool.connect()` takes no signal. Without this, a pipeline timeout fires while the request still waits in the pool's queue, and it gets a connection later for a caller that's gone. |
+| `signal.throwIfAborted()` | If the deadline passed while waiting for a connection, don't start a transaction nobody will read. |
+| `pg_cancel_backend` on `cancelPool` | Stops the statement on the server and frees its locks. The transaction then fails with `57014` and is rolled back. |
+| `set local statement_timeout` | Safety net when the cancel can't be sent (process crash, network split). `LOCAL` scopes it to this transaction. |
+| `idle_in_transaction_session_timeout` | Ends sessions left in an open transaction by a caller that died between statements. |
+| `await cancelling` before `release()` | Without it a late cancel can hit the next query that borrows this connection. |
+| `NonRetryableError` on a lost `COMMIT` | The only point where "failed" may mean "succeeded": stop retrying and let the caller decide. The caller receives the original error. |
+
+The isolation level is interpolated into SQL, so it is typed as a fixed union. Never pass user input there.
+
+## The pipeline: retry the whole transaction
+
+```ts twoslash title="db-pipeline.ts"
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+/** Errors where running the same transaction again can succeed. */
+const TRANSIENT = new Set([
+  '40001', // serialization_failure
+  '40P01', // deadlock_detected
+  '53300', // too_many_connections
+  '57P01', // admin_shutdown (failover, restart)
+  '08000', '08003', '08006', // connection exception / does not exist / failure
+  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT',
+]);
+const isTransient = (e: unknown) => TRANSIENT.has((e as { code?: string } | null)?.code ?? '');
+
+export const db = new ResiliencePipelineBuilder({ name: 'postgres' })
+  .addRetry({
+    maxRetryAttempts: 3,
+    delay: 20,
+    backoffType: 'exponential',
+    useJitter: true, // two conflicting transactions must not retry in lockstep
+    shouldHandle: ({ outcome }) => !outcome.ok && isTransient(outcome.error),
+  })
+  .addTimeout({ timeout: '2s', cooperative: true }) // per attempt; see below
+  .build();
+```
+
+Usage: the retry is **outside** `transaction()`, so every attempt is a fresh `BEGIN … COMMIT` that reads the data again.
+
+```ts
+// Read-modify-write that conflicts under SERIALIZABLE when two run at once.
+const withdraw = (accountId: number, amount: number) =>
+  db.execute(({ signal }) =>
+    transaction(signal, async (c) => {
+      const { rows } = await c.query('select balance from accounts where id = $1', [accountId]);
+      if (rows[0].balance < amount) throw new InsufficientFunds(accountId); // not transient: not retried
+      await c.query('update accounts set balance = $1 where id = $2', [rows[0].balance - amount, accountId]);
+    }, 'SERIALIZABLE'),
+  );
+
+await Promise.all([withdraw(1, 10), withdraw(1, 20)]); // one fails with 40001, is retried, both apply
+```
+
+Why this configuration:
+
+- **Your own `shouldHandle`.** The default predicate retries any error without a 4xx status, which for a database includes
+  constraint violations, syntax errors and `InsufficientFunds`. A database needs an allow list of codes.
+- **Timeouts are not retried.** `TimeoutRejectedError` isn't in the list: a query that took 2 s will likely take 2 s again, and
+  retrying it multiplies the load on a database that is already slow. Add `isTimeoutError(e)` to the predicate only for reads you know are cheap.
+- **`cooperative: true`.** By default the timeout returns the moment it fires. Here it waits for `transaction()` to finish
+  its cancel and rollback, so the next attempt doesn't start while the previous one still holds a connection and its row
+  locks. The wait is short (the cancel lands in milliseconds) and bounded by `statement_timeout`.
+- **Short, jittered delays.** Serialization conflicts clear in milliseconds. Without jitter, two transactions that collided
+  retry at the same instant and collide again.
+- **No total timeout here.** Put it where the budget is known: the inbound request (see [load shedding](/guides/load-shedding/)).
+  Nested pipelines inherit it, so `db.execute` inside a request is aborted when the request's budget runs out, and
+  `transaction()` cancels the query.
+
+<Aside type="caution" title="Side effects inside a retried transaction">
+The callback runs again on every retry. Anything it does outside the database (send an email, call an API, publish a
+message) happens once per attempt. Do those after the transaction commits, or write them to an outbox table inside it.
+</Aside>
+
+## Why no circuit breaker on the primary database
+
+A circuit breaker turns a failing dependency into fast rejections, and that pays off when there is something useful to do
+instead (a cache, a default, another provider). For the primary database there usually isn't:
+
+- **Nothing to fall back to.** Every write and most reads need it. An open breaker turns "the database is slow" into "every request fails for `breakDuration`", even after the database has recovered.
+- **The pool already bounds the damage.** `max` caps concurrent queries (a bulkhead) and `connectionTimeoutMillis` fails fast when they're all busy. That is the load protection a breaker would give, minus the false outages.
+- **The errors are often not "the database is down".** Deadlocks and serialization failures spike under contention, on a healthy database. A breaker counting them would open exactly when traffic is highest.
+
+Use a breaker for databases that are optional: read replicas (fall back to the primary), analytics stores, a search index,
+a cache. There, opening the circuit and serving the fallback is what you want.
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+declare function queryReplica(sql: string, signal: AbortSignal): Promise<unknown[]>;
+declare function queryPrimary(sql: string, signal: AbortSignal): Promise<unknown[]>;
+// ---cut---
+// Reads go to the replica; when it fails or lags into timeouts, the breaker opens and reads go to the primary.
+const replicaReads = new ResiliencePipelineBuilder<unknown[]>({ name: 'pg-replica' })
+  .addFallback({ fallbackAction: ({ context }) => queryPrimary('select …', context.signal) })
+  .addCircuitBreaker({ consecutiveFailures: 5, breakDuration: '15s' })
+  .addTimeout('500ms')
+  .build();
+
+const rows = await replicaReads.execute(({ signal }) => queryReplica('select …', signal));
+```
+
+## Other drivers
+
+- **MySQL (`mysql2`).** Same pattern: on abort, run `KILL QUERY <connection.threadId>` from a separate connection.
+  Server-side net: `SET SESSION max_execution_time = 5000` (milliseconds; `SELECT` only).
+- **ORMs and query builders** that hide the connection (Prisma, many Knex setups) can't cancel a single query. Set the
+  server-side limits in the connection configuration (for `pg`: `statement_timeout` and `lock_timeout` options), keep the pipeline
+  timeout slightly above them, and accept that the timeout only frees the caller.
+
+## Checklist
+
+- Pool: `connectionTimeoutMillis` set, a separate small pool for cancels.
+- Every query path passes `context.signal` down and cancels on abort.
+- `statement_timeout` (and `lock_timeout` for hot rows) as the server-side net.
+- Retry with an allow list of SQLSTATE codes, whole transaction per attempt, jitter on.
+- No retries of `COMMIT`s whose result is unknown; no external side effects inside the transaction.
+- Total budget from the request, not per query.
+
+## Related
+
+- [Timeout](/strategies/timeout/) (cooperative mode) and [Retry](/strategies/retry/)
+- [Context, signals and deadline propagation](/concepts/context-and-signals/)
+- [What counts as a failure](/concepts/failures/)

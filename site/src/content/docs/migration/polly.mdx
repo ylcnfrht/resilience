@@ -1,0 +1,343 @@
+---
+title: From Polly (.NET)
+description: Port Polly v8 resilience pipelines to TypeScript. Concept mapping, side-by-side code, and the behavioural differences to watch.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+**Who this is for:** teams that know Polly v8 (`ResiliencePipelineBuilder`, `AddRetry`, `ShouldHandle`) and now write TypeScript, or run .NET and Node services side by side and want them to read the same.
+
+The API follows Polly v8 closely: same builder, same strategy names, same option names in camelCase, the same defaults for retry, circuit breaker, timeout, hedging and chaos. This is an independent implementation, not a port of Polly's code. The differences below are deliberate.
+
+## Concept mapping
+
+| Polly v8 | resilience-pipeline |
+|---|---|
+| `new ResiliencePipelineBuilder<T>()` | `new ResiliencePipelineBuilder<T>()` (one generic builder; `T` defaults to `any`) |
+| `.AddRetry(new RetryStrategyOptions { … })` | `.addRetry({ … })` |
+| `.AddTimeout(TimeSpan.FromSeconds(2))` | `.addTimeout('2s')` or `.addTimeout(2000)` |
+| `.AddCircuitBreaker`, `.AddFallback`, `.AddHedging` | `.addCircuitBreaker`, `.addFallback`, `.addHedging` |
+| `.AddConcurrencyLimiter(permits, queue)` | `.addConcurrencyLimiter(permits, queue)` |
+| `.AddRateLimiter(new SlidingWindowRateLimiter(…))` | `.addSlidingWindowRateLimiter({ … })`; `.addRateLimiter({ … })` is a token bucket |
+| `.AddChaosFault` / `Outcome` / `Latency` / `Behavior` | `.addChaosFault` / `Outcome` / `Latency` / `Behavior` |
+| `TimeSpan` | milliseconds or a string: `'250ms'`, `'30s'`, `'5m'` |
+| `CancellationToken` | `AbortSignal` (`context.signal`) |
+| `ResilienceContext` + `ResilienceContextPool` | `ResilienceContext`, created per execution (no pool) |
+| `ResiliencePropertyKey<T>` | `ResiliencePropertyKey<T>` |
+| `PredicateBuilder<T>().Handle<E>().HandleResult(…)` | `new PredicateBuilder<T>().handle(E).handleResult(…)` |
+| `.HandleInner<E>()` | `.handleInner(E)` |
+| `ExecuteAsync(callback, token)` | `execute(callback, { signal })` |
+| `ExecuteOutcomeAsync` | `executeOutcome` (your callback returns a value, not an `Outcome`) |
+| `Outcome<T>` | `{ ok: true, result } \| { ok: false, error }` |
+| `TimeoutRejectedException`, `BrokenCircuitException`, `IsolatedCircuitException`, `RateLimiterRejectedException` | `TimeoutRejectedError`, `BrokenCircuitError`, `IsolatedCircuitError`, `RateLimiterRejectedError` (+ `BulkheadRejectedError` for the concurrency limiter) |
+| `CircuitBreakerManualControl`, `CircuitBreakerStateProvider` | same names |
+| `ResiliencePipelineRegistry<TKey>` / `AddResiliencePipeline` (DI) | `ResiliencePipelineRegistry`; NestJS: `ResilienceModule.forRoot({ pipelines })` |
+| `TimeProvider` / `FakeTimeProvider` | `timeProvider` / `FakeTimeProvider` from `resilience-pipeline/testing` |
+| Telemetry via `Polly.Extensions` | `onTelemetry()`, `diagnostics_channel`, `/otel`, `/prometheus` |
+
+## Side by side
+
+### Retry with backoff and a timeout per attempt
+
+<Tabs syncKey="polly">
+<TabItem label="Polly (C#)">
+
+```csharp
+var pipeline = new ResiliencePipelineBuilder<HttpResponseMessage>()
+    .AddRetry(new RetryStrategyOptions<HttpResponseMessage>
+    {
+        MaxRetryAttempts = 3,
+        BackoffType = DelayBackoffType.Exponential,
+        UseJitter = true,
+        Delay = TimeSpan.FromMilliseconds(200),
+        ShouldHandle = new PredicateBuilder<HttpResponseMessage>()
+            .Handle<HttpRequestException>()
+            .HandleResult(r => (int)r.StatusCode >= 500),
+        OnRetry = args =>
+        {
+            Console.WriteLine($"Retry after attempt {args.AttemptNumber}");
+            return default;
+        },
+    })
+    .AddTimeout(TimeSpan.FromSeconds(2))
+    .Build();
+
+var response = await pipeline.ExecuteAsync(
+    async token => await client.GetAsync(url, token),
+    cancellationToken);
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+declare const url: string;
+declare const controller: AbortController;
+// ---cut---
+import { PredicateBuilder, ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder<Response>()
+  .addRetry({
+    maxRetryAttempts: 3,
+    backoffType: 'exponential',
+    useJitter: true,
+    delay: 200,
+    shouldHandle: new PredicateBuilder<Response>()
+      .handle(TypeError) // fetch's network errors
+      .handleResult((r) => r.status >= 500),
+    onRetry: ({ attemptNumber }) => console.log(`Retry after attempt ${attemptNumber}`),
+  })
+  .addTimeout('2s')
+  .build();
+
+const response = await pipeline.execute(
+  ({ signal }) => fetch(url, { signal }),
+  { signal: controller.signal },
+);
+```
+
+</TabItem>
+</Tabs>
+
+`useJitter: true` with exponential backoff is Polly's decorrelated-jitter V2, the same curve.
+
+### Circuit breaker with manual control
+
+<Tabs syncKey="polly">
+<TabItem label="Polly (C#)">
+
+```csharp
+var manual = new CircuitBreakerManualControl();
+var state = new CircuitBreakerStateProvider();
+
+var pipeline = new ResiliencePipelineBuilder()
+    .AddCircuitBreaker(new CircuitBreakerStrategyOptions
+    {
+        FailureRatio = 0.5,
+        SamplingDuration = TimeSpan.FromSeconds(10),
+        MinimumThroughput = 8,
+        BreakDuration = TimeSpan.FromSeconds(30),
+        ManualControl = manual,
+        StateProvider = state,
+        OnOpened = args => { logger.LogWarning("Opened for {D}", args.BreakDuration); return default; },
+    })
+    .Build();
+
+await manual.IsolateAsync();
+await manual.CloseAsync();
+if (state.CircuitState == CircuitState.Open) { /* … */ }
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+import { CircuitBreakerManualControl, CircuitBreakerStateProvider, ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const manual = new CircuitBreakerManualControl();
+const state = new CircuitBreakerStateProvider();
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addCircuitBreaker({
+    failureRatio: 0.5,
+    samplingDuration: '10s',
+    minimumThroughput: 8,
+    breakDuration: '30s',
+    manualControl: manual,
+    stateProvider: state,
+    onOpened: ({ breakDuration }) => console.warn(`Opened for ${breakDuration} ms`),
+  })
+  .build();
+
+const release = await manual.isolate(); // returns this isolation's release function
+await release();                       // or manual.close() to drop every isolation
+if (state.circuitState === 'open') { /* … */ }
+```
+
+</TabItem>
+</Tabs>
+
+### Fallback
+
+<Tabs syncKey="polly">
+<TabItem label="Polly (C#)">
+
+```csharp
+var pipeline = new ResiliencePipelineBuilder<UserAvatar>()
+    .AddFallback(new FallbackStrategyOptions<UserAvatar>
+    {
+        ShouldHandle = new PredicateBuilder<UserAvatar>().Handle<HttpRequestException>(),
+        FallbackAction = args => Outcome.FromResultAsValueTask(UserAvatar.Blank),
+    })
+    .Build();
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+interface UserAvatar { url: string }
+const blankAvatar: UserAvatar = { url: '/blank.png' };
+// ---cut---
+import { PredicateBuilder, ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder<UserAvatar>()
+  .addFallback({
+    shouldHandle: new PredicateBuilder<UserAvatar>().handle(TypeError),
+    fallbackAction: () => blankAvatar, // return the value; no Outcome wrapper
+  })
+  .build();
+```
+
+</TabItem>
+</Tabs>
+
+`fallbackValue: blankAvatar` is a shorter form for a constant.
+
+### Hedging
+
+<Tabs syncKey="polly">
+<TabItem label="Polly (C#)">
+
+```csharp
+var pipeline = new ResiliencePipelineBuilder<HttpResponseMessage>()
+    .AddHedging(new HedgingStrategyOptions<HttpResponseMessage>
+    {
+        MaxHedgedAttempts = 2,
+        Delay = TimeSpan.FromMilliseconds(300),
+    })
+    .Build();
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder<Response>()
+  .addHedging({ maxHedgedAttempts: 2, delay: '300ms' })
+  .build();
+```
+
+</TabItem>
+</Tabs>
+
+### Context properties
+
+<Tabs syncKey="polly">
+<TabItem label="Polly (C#)">
+
+```csharp
+var tenantKey = new ResiliencePropertyKey<string>("tenant");
+
+var context = ResilienceContextPool.Shared.Get(cancellationToken);
+context.Properties.Set(tenantKey, "acme");
+try
+{
+    await pipeline.ExecuteAsync(async ctx =>
+    {
+        var tenant = ctx.Properties.GetValue(tenantKey, "none");
+        await CallAsync(tenant, ctx.CancellationToken);
+    }, context);
+}
+finally
+{
+    ResilienceContextPool.Shared.Return(context);
+}
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+import { ResiliencePipelineBuilder, ResiliencePropertyKey } from 'resilience-pipeline';
+declare function call(tenant: string, signal: AbortSignal): Promise<void>;
+declare const controller: AbortController;
+const pipeline = new ResiliencePipelineBuilder().addTimeout('2s').build();
+// ---cut---
+const TENANT = new ResiliencePropertyKey<string>('tenant');
+
+await pipeline.execute(
+  async (ctx) => {
+    const tenant = TENANT.get(ctx) ?? 'none';
+    await call(tenant, ctx.signal);
+  },
+  { signal: controller.signal, properties: new Map([[TENANT.key, 'acme']]) },
+);
+```
+
+</TabItem>
+</Tabs>
+
+### Registry and testing
+
+<Tabs syncKey="polly">
+<TabItem label="Polly (C#)">
+
+```csharp
+services.AddResiliencePipeline("inventory-api", builder => builder
+    .AddRetry(new RetryStrategyOptions())
+    .AddTimeout(TimeSpan.FromSeconds(1)));
+
+var pipeline = serviceProvider
+    .GetRequiredService<ResiliencePipelineProvider<string>>()
+    .GetPipeline("inventory-api");
+
+// Tests
+var time = new FakeTimeProvider();
+var testPipeline = new ResiliencePipelineBuilder { TimeProvider = time }
+    .AddTimeout(TimeSpan.FromSeconds(1)).Build();
+time.Advance(TimeSpan.FromSeconds(2));
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+import { ResiliencePipelineBuilder, ResiliencePipelineRegistry } from 'resilience-pipeline';
+import { FakeTimeProvider } from 'resilience-pipeline/testing';
+
+const registry = new ResiliencePipelineRegistry();
+const pipeline = registry.getOrAddPipeline('inventory-api', (b) => b.addRetry().addTimeout('1s'));
+
+// Tests
+const time = new FakeTimeProvider();
+const testPipeline = new ResiliencePipelineBuilder({ timeProvider: time }).addTimeout('1s').build();
+await time.advance('2s'); // async: lets pending promise callbacks run
+```
+
+</TabItem>
+</Tabs>
+
+There is no dependency-injection container in JavaScript to hook into. Use one registry per process, or `ResilienceModule.forRoot({ pipelines })` in [NestJS](/integrations/nestjs/).
+
+## Behavioural differences to watch
+
+<Aside type="caution" title="Timeouts don't wait for your callback">
+Polly v8's timeout cancels the token and then waits for the callback to finish. Here the timeout aborts `context.signal` and returns `TimeoutRejectedError` **immediately**, because JavaScript can't force-stop a promise and a callback that ignores the signal would otherwise hold the caller forever. Pass `addTimeout({ timeout: '2s', cooperative: true })` for Polly's behaviour. Hedging likewise returns the winner without waiting for the aborted attempts.
+</Aside>
+
+- **Stricter default predicates.** Polly's default `ShouldHandle` handles every exception except `OperationCanceledException`. Here retry, circuit breaker and hedging skip:
+  - client errors: anything with a 4xx `status` / `statusCode` / `response.status`, except 408 and 429;
+  - rejections from other strategies (`BrokenCircuitError`, `RateLimiterRejectedError`, `LockNotAcquiredError`);
+  - caller aborts.
+
+  Fallback handles rejections but not 4xx or aborts. Passing your own `shouldHandle` replaces the default, as in Polly.
+- **An open circuit is never retried**, even with a custom `shouldHandle`. In Polly, a retry outside a breaker retries `BrokenCircuitException` by default.
+- **Unhandled errors don't count as successes.** Polly's breaker records an outcome that `ShouldHandle` rejects as a success. Here it's ignored: a 404 is neither a failure nor a success.
+- **Rate limiter naming.** Polly's `AddRateLimiter` takes any `System.Threading.RateLimiting` limiter. Here `addRateLimiter` is a token bucket; fixed window, sliding window and partitioned limiters have their own methods, and custom algorithms plug in through `RateLimiterAlgorithm`.
+- **Validation is looser.** For example, break and sampling durations below Polly's 500 ms minimum are accepted.
+- **Same as Polly:** strategies run in the order they're added (first added = outermost); `attemptNumber` is 0-based (`0` is the original call, and `onRetry` receives the number of the attempt that failed); retry, breaker, timeout, hedging and chaos defaults match (3 retries, 2 s constant delay, ratio 0.1 over 100 calls in 30 s, 5 s break, 30 s timeout).
+- **Execution callbacks get the context, not a token.** `execute(({ signal, attemptNumber, properties }) => …)`. Pass `signal` to `fetch` and your drivers; that's what makes timeouts and hedging cancel real work.
+
+## What you gain
+
+- **Typed errors:** `pipeline.settle()` + `Outcome.match()` make a forgotten `CIRCUIT_OPEN` or `TIMEOUT` handler a compile error. See [Typed errors](/concepts/typed-errors/).
+- **Deadline propagation:** a pipeline running inside another inherits its signal, with no token plumbing.
+- **Strategies Polly doesn't ship:** cache and coalesce, lock with fencing tokens, adaptive concurrency, retry budget, `consecutiveFailures`, count-based breaker window, `halfOpenMaxCalls`, breaker snapshots and Redis-shared breaker state.
+- **Runs everywhere:** Node, Bun, Deno, Cloudflare Workers and browsers, with zero dependencies.
+
+Related: [Pipelines](/concepts/pipelines/), [Failures and defaults](/concepts/failures/).

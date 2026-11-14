@@ -1,0 +1,79 @@
+---
+title: Why resilience-pipeline
+description: What sets resilience-pipeline apart — Polly v8 API, hedging, adaptive concurrency, deadline propagation, typed errors, zero deps — and where it doesn't fit.
+sidebar:
+  order: 4
+---
+
+
+## Polly v8, in TypeScript
+
+If you know [Polly](https://www.pollydocs.org/), you know this API: `ResiliencePipelineBuilder`, `addRetry`,
+`addCircuitBreaker`, `shouldHandle`, `PredicateBuilder`, `ResiliencePropertyKey`, `OnRetry` and `OnCircuitOpened`
+events, Simmy-style chaos. The differences are JavaScript ones: durations are milliseconds or strings like `'30s'`,
+and `CancellationToken` is an `AbortSignal`. See [Migrating from Polly](/migration/polly/).
+
+## Strategies other libraries don't have
+
+**Hedging.** When a call is slow, start a second one and take whichever answers first. It cuts tail latency
+(p99) on reads without adding a timeout.
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+// ---cut---
+const search = new ResiliencePipelineBuilder()
+  .addHedging({ delay: '150ms', maxHedgedAttempts: 1 }) // second request after 150 ms; the loser is aborted
+  .build();
+```
+
+**Adaptive concurrency.** A bulkhead whose limit tunes itself from observed latency, with the gradient2, vegas
+and AIMD algorithms known from Netflix's concurrency-limits. You stop guessing "how many parallel calls can this database take".
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+// ---cut---
+const db = new ResiliencePipelineBuilder()
+  .addAdaptiveConcurrencyLimiter({ algorithm: 'gradient2', minLimit: 5, maxLimit: 200 })
+  .build();
+```
+
+Also built in: a [retry budget](/strategies/retry/) against retry storms, [request batching](/strategies/batcher/),
+distributed [locks](/strategies/lock/) with fencing tokens, and [Redis-backed](/integrations/redis/) limiters and
+breaker state.
+
+## Deadline propagation
+
+A pipeline executed inside another one inherits its signal through `AsyncLocalStorage`. A 3-second budget on an
+incoming request cancels every downstream call made under it, even ones that never received the signal. See
+[Context and signals](/concepts/context-and-signals/).
+
+## Typed errors
+
+`pipeline.settle()` returns an outcome whose error type is computed from the strategies you added.
+`Outcome.match()` then requires a handler per error code. Add a circuit breaker, forget to handle `CIRCUIT_OPEN`,
+and the build fails. See [Typed errors](/concepts/typed-errors/).
+
+## Small, dependency-free, everywhere
+
+- **Zero runtime dependencies.** Integrations (NestJS, OpenTelemetry, axios…) are optional peers in subpaths.
+- **Every runtime.** Node.js ≥ 20.16, Bun, Deno, Cloudflare Workers, browsers. No static `node:` imports.
+- **Tree-shakeable.** The `retry()` one-liner is 4.1 KB min+gzip; retry + breaker + timeout is 7.1 KB. See
+  [Bundle size](/concepts/bundle-size/).
+- **Testable.** `FakeTimeProvider` runs 30 seconds of backoff instantly.
+
+## Defaults that don't make things worse
+
+Retries and circuit breakers ignore 4xx client errors, caller aborts and rejections from other strategies. Retrying
+a 404 can't help, and a breaker that counts its own "circuit open" rejections never closes. An open circuit is never
+retried. Calls marked `idempotent: false` are never repeated once they may have reached the dependency. See
+[What counts as a failure](/concepts/failures/).
+
+## When it is not the right tool
+
+- **You need one retry loop and nothing else.** [p-retry](https://github.com/sindresorhus/p-retry) is smaller.
+  The `retry()` one-liner is close, but a dedicated library is still lighter.
+- **You use every strategy through `ResiliencePipelineBuilder` in a browser bundle.** The full builder is 15.1 KB
+  min+gzip. Switch to `PipelineBuilder` to pay only for what you use.
+- **You want durable workflows** (retries that survive a process restart, sagas). That is a job for a workflow
+  engine or a queue, not an in-process pipeline.
+

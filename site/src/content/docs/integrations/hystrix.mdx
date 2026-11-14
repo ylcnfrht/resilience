@@ -1,0 +1,66 @@
+---
+title: Hystrix dashboard
+description: Serve pipeline metrics in the legacy Hystrix event-stream format for the Hystrix dashboard or Turbine, opossum-hystrix compatible.
+sidebar:
+  order: 12
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`createHystrixStream()` serves pipeline metrics in the Hystrix `text/event-stream` format, for the Hystrix dashboard or Turbine. It is compatible with what opossum-hystrix produces, so a dashboard set up for opossum keeps working after a migration. For anything new, prefer [Prometheus](/integrations/prometheus/) or [OpenTelemetry](/integrations/opentelemetry/): Hystrix has been in maintenance mode for years.
+
+```ts
+import express from 'express';
+import { createHystrixStream } from 'resilience-pipeline/hystrix';
+
+const hystrix = createHystrixStream({ pipelines: ['payments', 'inventory'] });
+
+const app = express();
+app.get('/hystrix.stream', hystrix.handler);
+
+// on shutdown:
+hystrix.dispose();
+```
+
+Point the dashboard at `http://<host>/hystrix.stream`. The handler takes any Node `(req, res)` pair (`http.createServer`, Express, Koa's `ctx.req`/`ctx.res`): it writes one `HystrixCommand` object per pipeline every `interval`, and stops when the request closes.
+
+## Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `pipelines` | `string[]` | required | Pipeline names to report, one `HystrixCommand` each. |
+| `group` | `string` | `'resilience-pipeline'` | Hystrix command group. |
+| `window` | `Duration` | `'10s'` | Rolling window, Hystrix's default. |
+| `interval` | `Duration` | `'1s'` | How often the stream writes. |
+| `timeProvider` | `TimeProvider` | system clock, unref'd timers | For tests. |
+
+The returned object has `handler(req, res)`, `commands()` (the current `HystrixCommand` objects, to serve as JSON or log), and `dispose()`, which stops the telemetry listeners and every open stream.
+
+## How the numbers map
+
+The data comes from [`createStats`](/integrations/stats/) plus circuit breaker events. Hystrix's model (thread pools, a command per call site) doesn't match a pipeline one to one, so some fields are approximations:
+
+| Hystrix field | Source |
+|---|---|
+| `requestCount`, `errorCount`, `errorPercentage` | executions and failed executions in the window. |
+| `rollingCountSuccess` | successful executions. |
+| `rollingCountShortCircuited` | circuit rejections (`OnCircuitRejected`) in the window. |
+| `rollingCountSemaphoreRejected` | other rejections: bulkhead, rate limit, lock. |
+| `rollingCountTimeout` | `OnTimeout` events (one per timed-out attempt). |
+| `rollingCountFailure` | failures minus rejections minus timeouts, floored at 0. |
+| `rollingCountFallbackSuccess` | fallbacks. |
+| `rollingCountResponsesFromCache`, `rollingCountCollapsedRequests` | cache hits, coalesced calls. |
+| `latencyExecute`, `latencyTotal` (+ `_mean`) | execution latency percentiles (0, 25, 50, 75, 90, 95, 99, 99.5, 100), rounded to ms; both are the same data. |
+| `isCircuitBreakerOpen` | `true` while the pipeline's breaker is open **or half-open**. |
+| `currentConcurrentExecutionCount`, `rollingMaxConcurrentExecutionCount`, thread-pool and other counters | always `0`. |
+| `propertyValue_*` | fixed values (`SEMAPHORE` isolation, breaker enabled, the window length). |
+
+<Aside type="caution">
+`rollingCountFailure` subtracts per-attempt timeouts from per-execution failures, so with retries that recover from timeouts it undercounts plain failures. `errorPercentage` is exact (failed executions / executions).
+</Aside>
+
+## Related
+
+- [createStats](/integrations/stats/)
+- [Migrating from opossum](/migration/opossum/)
+- [Prometheus](/integrations/prometheus/), [OpenTelemetry](/integrations/opentelemetry/)

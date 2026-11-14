@@ -1,0 +1,207 @@
+---
+title: fetch
+description: A drop-in fetch with a total timeout, retries that honour Retry-After, a circuit breaker per host and per-request overrides.
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`createResilientFetch()` returns a function with the same signature as `fetch`. Every request goes through a total timeout, retries with backoff and jitter, and a circuit breaker per host. Use it for any outbound HTTP call where you would otherwise write the same retry loop again. It needs no dependencies: it wraps `globalThis.fetch` (Node ≥ 20, Bun, Deno, Workers, browsers).
+
+```ts twoslash
+import { createResilientFetch } from 'resilience-pipeline/fetch';
+
+const http = createResilientFetch({ name: 'payments' });
+
+const res = await http('https://api.example.com/balance');
+if (!res.ok) throw new Error(`HTTP ${res.status}`);
+const balance = await res.json();
+```
+
+The result is still a `typeof fetch`, so you can pass it to any SDK or wrapper that accepts a custom `fetch` option.
+
+## What each request goes through
+
+```
+total timeout (30 s) → retry (3×, exponential from 200 ms, full jitter, Retry-After)
+  → per host: circuit breaker → concurrency limiter (optional) → attempt timeout (10 s) → fetch
+```
+
+- **Total timeout** bounds the whole call, retries and their delays included.
+- **Retry** repeats network errors, timeouts and `408 429 500 502 503 504` responses. A `Retry-After` header (seconds or an HTTP date) replaces the computed delay.
+- **Circuit breaker per host** (`url.origin`): opens when 50% of the last 20 calls failed (once at least 10 were seen) and stays open 10 s. A dead host doesn't block calls to healthy ones.
+- **Attempt timeout** bounds each single attempt, so one hung connection doesn't use up the total budget.
+
+Responses come back as they are. A final `503` resolves like it does with `fetch`; only network errors and resilience rejections (`TimeoutRejectedError`, `BrokenCircuitError`, `BulkheadRejectedError`) throw. A response that is discarded for a retry has its body cancelled first, so the connection goes back to the pool instead of waiting for garbage collection.
+
+## Handling the failures
+
+```ts twoslash
+import { createResilientFetch } from 'resilience-pipeline/fetch';
+import { isBrokenCircuitError, isTimeoutError } from 'resilience-pipeline';
+
+const http = createResilientFetch({ name: 'inventory' });
+declare const cached: { stock: number };
+// ---cut---
+async function stock(sku: string) {
+  try {
+    const res = await http(`https://inventory.example.com/stock/${sku}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`); // 4xx, or a 5xx after the last retry
+    return (await res.json()) as { stock: number };
+  } catch (error) {
+    if (isBrokenCircuitError(error) || isTimeoutError(error)) return cached;
+    throw error;
+  }
+}
+```
+
+## Configuration
+
+```ts twoslash
+import { createResilientFetch } from 'resilience-pipeline/fetch';
+
+const http = createResilientFetch({
+  name: 'payments',
+  totalTimeout: '15s',
+  attemptTimeout: '3s',
+  retry: { maxRetryAttempts: 2, delay: 500, maxDelay: '5s' },
+  retryOn: [429, 502, 503],
+  circuitBreaker: { failureRatio: 0.3, breakDuration: '30s' },
+  concurrency: { permitLimit: 20, queueLimit: 50, queueTimeout: '1s' },
+});
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `name` | `string` | none | Pipeline name for telemetry. Per-host pipelines are named `<name>/<key>`, e.g. `payments/https://api.example.com`. |
+| `totalTimeout` | `Duration` | `'30s'` | Budget for the whole call, retries and delays included. |
+| `attemptTimeout` | `Duration` | `'10s'` | Budget for each attempt. |
+| `retry` | `RetryOptions` \| `false` | 3 retries, `delay: 200`, `backoffType: 'exponential'`, `useJitter: 'full'` | Merged over the defaults (every [retry option](/strategies/retry/) except `shouldHandle`). `false`: no retries. `respectRetryAfter: false` ignores `Retry-After`. |
+| `retryOn` | `number[]` \| `(args) => boolean` | `[408, 429, 500, 502, 503, 504]` | What to retry. A status list replaces the default statuses; network errors and timeouts are still retried. A function decides alone. |
+| `circuitBreaker` | `CircuitBreakerOptions` \| `false` | `failureRatio: 0.5`, `samplingCount: 20`, `minimumThroughput: 10`, `breakDuration: '10s'` | Merged over the defaults (every [breaker option](/strategies/circuit-breaker/) except `shouldHandle`). `false`: no breaker. |
+| `concurrency` | `number` \| `ConcurrencyLimiterOptions` | no limit | Max attempts in flight per key. Beyond it (and the queue), attempts are rejected with `BulkheadRejectedError`. |
+| `pipelineKey` | `(url: URL) => string` | `url => url.origin` | Which requests share a breaker and a limiter. `() => 'all'` shares one for everything. |
+| `maxPipelines` | `number` | `100` | Max per-key pipelines kept. The least recently used is dropped beyond it, and with it its breaker state. |
+| `retryUnsafeMethods` | `boolean` | `false` | Retry POST, PATCH and other unsafe methods without an `Idempotency-Key` header too. |
+| `timeProvider` | `TimeProvider` | system clock | For tests with [`FakeTimeProvider`](/guides/testing/). |
+| `fetch` | `typeof fetch` | `globalThis.fetch` | The fetch to wrap (undici's, a mock, an instrumented one). |
+| `pipeline` | `ResiliencePipeline<Response>` | built in | Your own pipeline instead. Per-request `retries` and the per-host split are then up to you. |
+| `onBeforeAttempt` | `(request, context) => Request \| void` | none | Called before every attempt with a fresh `Request`; return a replacement. |
+
+`retryOn` as a function receives `{ response, error, attemptNumber }`: `response` is set when one arrived, `error` when the attempt threw. The circuit breaker ignores `retryOn` and always counts network errors, timeouts and `408 429 500 502 503 504` as failures.
+
+## Per-request overrides
+
+Pass `resilience` in the second argument. The type is `ResilientRequestInit`, a `RequestInit` with one more field.
+
+```ts twoslash
+import { createResilientFetch } from 'resilience-pipeline/fetch';
+const http = createResilientFetch({ name: 'api' });
+declare const order: object;
+// ---cut---
+// A health probe: one attempt, short budget.
+await http('https://api.example.com/health', { resilience: { retries: 0, timeout: '1s' } });
+
+// A slow export: more time, no attempt timeout below the total.
+await http('https://api.example.com/export', { resilience: { timeout: '2m', attemptTimeout: '2m' } });
+
+// Safe to repeat even though it's a POST (the server deduplicates by order id).
+await http('https://api.example.com/orders', {
+  method: 'POST',
+  body: JSON.stringify(order),
+  resilience: { idempotent: true, retryOn: [503] },
+});
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `retries` | `number` \| `false` | Retries for this request. `0` or `false`: a single attempt. |
+| `retryOn` | same as the option | What to retry for this request. |
+| `timeout` | `Duration` | Total budget for this request. `Infinity` disables it. |
+| `attemptTimeout` | `Duration` | Budget per attempt for this request. |
+| `idempotent` | `boolean` | `true` forces retrying, `false` forbids it, whatever the method and headers (a stream body is still never retried). |
+
+Requests with a different `retries` value still share the same per-host breakers and limiters.
+
+## Idempotency: what gets retried
+
+A request that may have reached the server is only repeated when repeating it is safe:
+
+- `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT` and `DELETE` are retried.
+- `POST`, `PATCH` and any other method are retried only with an `Idempotency-Key` header, `resilience: { idempotent: true }`, or `retryUnsafeMethods: true`.
+- A request whose body is a stream (`ReadableStream`, a Node stream or async iterable; for axios, a stream `data`) is never repeated once sent, whatever the rules above: the body can only be read once. The failed response or error is returned as is. Buffer the body (string, `Uint8Array`, `Blob`) to make it retryable.
+
+A POST that timed out may have charged a card; retrying it could charge it twice. Send an `Idempotency-Key` when the API supports one (Stripe, Adyen and most payment APIs do):
+
+```ts twoslash
+import { createResilientFetch } from 'resilience-pipeline/fetch';
+const http = createResilientFetch({ name: 'payments' });
+// ---cut---
+await http('https://api.example.com/charges', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
+  body: JSON.stringify({ amount: 1200, currency: 'eur' }),
+});
+```
+
+## Refreshing a token per attempt
+
+`onBeforeAttempt` runs before every attempt, retries included. It gets a new `Request` (a `Request` input is cloned each time, so its body can be sent again) and the execution context. Return a replacement, or nothing to send it unchanged.
+
+```ts twoslash
+import { createResilientFetch } from 'resilience-pipeline/fetch';
+declare function getAccessToken(): Promise<string>;
+// ---cut---
+const http = createResilientFetch({
+  name: 'crm',
+  onBeforeAttempt: async (request, { attemptNumber }) => {
+    const headers = new Headers(request.headers);
+    headers.set('authorization', `Bearer ${await getAccessToken()}`);
+    headers.set('x-attempt', String(attemptNumber));
+    return new Request(request, { headers });
+  },
+});
+```
+
+To retry a `401` after the refresh, add it to `retryOn`: `retryOn: [401, 429, 503]`.
+
+## Cancellation and deadlines
+
+- `init.signal` cancels the whole call, retries included. The call rejects with the signal's reason.
+- Each attempt gets its own signal, aborted by the attempt timeout, the total timeout or yours.
+- Called inside another pipeline (an [inbound request deadline](/integrations/express-and-hono/), for example), the call inherits that pipeline's signal: when the outer budget runs out, the request is aborted. See [deadline propagation](/concepts/context-and-signals/).
+
+## Bring your own pipeline
+
+`standardHttpPipeline(options)` builds the same pipeline as a plain `ResiliencePipeline<Response>`, for when you want to call `fetch` yourself or add strategies around it. `isTransientHttpOutcome`, `parseRetryAfter` and `retryAfterMs` are exported too, for your own predicates.
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { createResilientFetch, isTransientHttpOutcome, retryAfterMs } from 'resilience-pipeline/fetch';
+
+const pipeline = new ResiliencePipelineBuilder<Response>({ name: 'search' })
+  .addRetry({
+    maxRetryAttempts: 2,
+    shouldHandle: isTransientHttpOutcome,
+    delayGenerator: ({ outcome }) => (outcome.ok ? retryAfterMs(outcome.result) : undefined),
+  })
+  .addTimeout('2s')
+  .build();
+
+const http = createResilientFetch({ pipeline });
+```
+
+<Aside type="caution" title="Gotchas">
+- **Stream bodies can't be retried.** A `ReadableStream` body is consumed by the first attempt. Use a string, `Blob`, `FormData` or `URLSearchParams` body (or a `Request`, which is cloned per attempt), or set `retries: 0`.
+- **`Retry-After` is not capped by `maxDelay`.** A long `Retry-After` waits until the total timeout ends the call with `TimeoutRejectedError`. Lower `totalTimeout`, or set `retry: { respectRetryAfter: false }`.
+- **Telemetry names.** Breaker and attempt-timeout events carry the per-host name (`payments/https://…`), not `payments`. Keep that in mind when you filter [stats](/integrations/stats/) or dashboards by pipeline name.
+- **Many hosts.** Above `maxPipelines` keys, the least recently used host loses its breaker state. Raise it if you call more hosts than that.
+</Aside>
+
+## Related
+
+- [axios](/integrations/axios/): the same pipeline for axios instances.
+- [Retry](/strategies/retry/), [Circuit breaker](/strategies/circuit-breaker/), [Timeout](/strategies/timeout/)
+- [Calling rate-limited APIs](/guides/rate-limited-apis/)
+- [Typed errors](/concepts/typed-errors/)

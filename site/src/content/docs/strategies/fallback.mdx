@@ -1,0 +1,232 @@
+---
+title: Fallback
+description: Return a substitute value when a call fails. Catch everything, only specific error codes, map errors to your own, or serve the last good value.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+Fallback turns a failure into a usable answer: a cached value, a default, a degraded response. It runs **after** the strategies added behind it have given up, so it is usually the first strategy you add (the outermost).
+
+Use it when a degraded answer is better than an error: recommendations, prices from cache, a feature flag's default. Don't use it to hide failures the caller must know about, such as a payment that didn't go through.
+
+## Example
+
+<Tabs syncKey="builder">
+<TabItem label="ResiliencePipelineBuilder">
+
+```ts twoslash
+declare function getRates(signal: AbortSignal): Promise<Record<string, number>>;
+declare const lastKnownRates: Record<string, number>;
+// ---cut---
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder<Record<string, number>>()
+  .addFallback({ fallbackAction: () => lastKnownRates }) // outermost: catches what's left
+  .addRetry({ maxRetryAttempts: 2 })
+  .addTimeout('1s')
+  .build();
+
+const rates = await pipeline.execute(({ signal }) => getRates(signal));
+```
+
+</TabItem>
+<TabItem label="PipelineBuilder (smallest bundle)">
+
+```ts twoslash
+declare function getRates(signal: AbortSignal): Promise<Record<string, number>>;
+declare const lastKnownRates: Record<string, number>;
+// ---cut---
+import { PipelineBuilder, fallbackStrategy, retryStrategy, timeoutStrategy } from 'resilience-pipeline';
+
+const pipeline = new PipelineBuilder<Record<string, number>>()
+  .add(fallbackStrategy({ fallbackAction: () => lastKnownRates }))
+  .add(retryStrategy({ maxRetryAttempts: 2 }))
+  .add(timeoutStrategy('1s'))
+  .build();
+
+const rates = await pipeline.execute(({ signal }) => getRates(signal));
+```
+
+</TabItem>
+</Tabs>
+
+## How it works
+
+1. The rest of the pipeline runs.
+2. If `shouldHandle` matches the outcome, `onFallback` runs, then `fallbackAction(args)` (or `fallbackValue`) becomes the result. With `executeStream`, a successful stream it replaces is closed.
+3. Otherwise the outcome passes through unchanged.
+
+If `fallbackAction` throws or rejects, the execution fails with **that** error.
+
+### What the default catches
+
+The fallback default is broader than retry's: it also covers rejections, because "the circuit is open" is exactly when you want a substitute.
+
+| Outcome | Default fallback | Default retry / breaker |
+|---|---|---|
+| Errors: network, 5xx, timeouts, 408, 429 | handled | handled |
+| Rejections: open circuit, full limiter (`isRejection`) | handled | not handled |
+| Client errors: 4xx except 408/429 (`isClientError`) | not handled | not handled |
+| Aborts: the caller went away, or an `AbortError` | not handled | not handled |
+| Results (any value returned) | not handled | not handled |
+
+A 404 isn't a failure to hide. A caller who cancelled doesn't want an answer. To catch results or 4xx errors, pass your own `shouldHandle`; it replaces the default. See [What counts as a failure](/concepts/failures/).
+
+## fallbackAction or fallbackValue
+
+| | `fallbackAction` | `fallbackValue` |
+|---|---|---|
+| Computed | Per failure, may be async | Once, when you build the pipeline |
+| Sees the failure | Yes: `{ outcome, context }` | No |
+| Use it for | Cache lookups, a value that depends on the error or the request | Constants: `[]`, `null`, a default config |
+
+Give one of the two; with neither, `build()` throws `RangeError`. If both are set, `fallbackAction` wins.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, isBrokenCircuitError } from 'resilience-pipeline';
+type Product = { id: string; name: string };
+declare const cache: { get(key: string): Promise<Product[] | undefined> };
+// ---cut---
+const empty = new ResiliencePipelineBuilder<Product[]>().addFallback({ fallbackValue: [] }).build();
+
+const cached = new ResiliencePipelineBuilder<Product[]>()
+  .addFallback({
+    fallbackAction: async ({ outcome, context }) => {
+      if (!outcome.ok && isBrokenCircuitError(outcome.error)) console.warn('catalog circuit open');
+      return (await cache.get(context.operationKey ?? 'all')) ?? [];
+    },
+    onFallback: ({ outcome }) => console.warn('serving fallback', outcome),
+  })
+  .addCircuitBreaker({ consecutiveFailures: 5 })
+  .build();
+```
+
+## Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `name` | `string` | `'Fallback'` | Strategy name in telemetry and `getStrategy()`. |
+| `shouldHandle` | `(args) => boolean` (or a promise) or `PredicateBuilder` | every failure except aborts and 4xx (408/429 included) | Which outcomes get the fallback. |
+| `fallbackAction` | `(args: { outcome, context }) => T` (or a promise) | none | Produces the substitute. Throwing fails the execution with that error. |
+| `fallbackValue` | `T` | none | Fixed substitute. |
+| `onFallback` | `(args: { outcome, context }) => void` | none | Before the substitute is produced. May be async; it's awaited. |
+
+## Only specific errors: addFallbackOn
+
+`addFallbackOn(codes, fallbackAction, options?)` handles failures whose `error.code` is in `codes` and lets everything else through. `options` takes `name`, `fallbackValue` and `onFallback`.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, Outcome } from 'resilience-pipeline';
+declare function getPrice(sku: string, signal: AbortSignal): Promise<number>;
+declare function cachedPrice(sku: string): number;
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder<number>()
+  .addFallbackOn(['CIRCUIT_OPEN', 'CIRCUIT_ISOLATED'], () => cachedPrice('sku-1'))
+  .addCircuitBreaker({ consecutiveFailures: 5 })
+  .addTimeout('2s')
+  .build();
+
+const outcome = await pipeline.settle(({ signal }) => getPrice('sku-1', signal));
+//    ^?
+```
+
+The listed codes leave the pipeline's [typed error](/concepts/typed-errors/) union; the timeout stays, so `Outcome.match` still needs a `TIMEOUT` branch. An error class leaves the union only when **all** its codes are listed: `BrokenCircuitError` can be `CIRCUIT_OPEN` or `CIRCUIT_ISOLATED`, so list both.
+
+The equivalent for `PipelineBuilder` is `fallbackOnStrategy(codes, fallbackAction, options?)`.
+
+## Effect on typed errors
+
+`pipeline.settle()` returns an outcome typed with every error the strategies can raise. Fallbacks remove the errors they handle, but only those of strategies added **after** them:
+
+| Strategy | Error type afterwards |
+|---|---|
+| `addFallback({ … })` without `shouldHandle` | Every coded error of the strategies added after it is removed. |
+| `addFallback({ shouldHandle, … })` | Unchanged: the compiler can't know what your predicate catches. |
+| `addFallbackOn(codes, …)` | Errors whose codes are all in `codes` are removed. |
+| `addMapError(mapper)` | Every coded error of the strategies added after it is replaced by the mapper's return type. |
+| `addStaleFallback({ … })` | Unchanged: there may be no stale value to serve. |
+
+## Map errors to your own: addMapError
+
+`addMapError(mapper)` doesn't substitute a value. It turns every failure of the strategies after it, the callback's included, into your own error. Use it at a service boundary so callers see `PaymentUnavailable`, not `TimeoutRejectedError`. Aborts pass through unchanged.
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+declare function charge(signal: AbortSignal): Promise<string>;
+// ---cut---
+class PaymentUnavailable extends Error {
+  readonly code = 'PAYMENT_UNAVAILABLE' as const;
+}
+
+const pipeline = new ResiliencePipelineBuilder<string>()
+  .addMapError((error) => new PaymentUnavailable('payments are down', { cause: error }))
+  .addRetry()
+  .addTimeout('2s')
+  .build();
+
+const outcome = await pipeline.settle(({ signal }) => charge(signal)); // error: PaymentUnavailable | UnexpectedError
+```
+
+`mapper(error, context)` runs synchronously. The `PipelineBuilder` form is `mapErrorStrategy(mapper, name?)` (default name `'MapError'`).
+
+## Last good value: addStaleFallback
+
+`addStaleFallback` remembers the last successful result per key and returns it when a call fails. Unlike a [cache](/strategies/cache/), every call still goes to the dependency; the stored value is only used on failure.
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+type Profile = { id: string; name: string };
+declare function getProfile(id: string, signal: AbortSignal): Promise<Profile>;
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder<Profile>()
+  .addStaleFallback({ maxAge: '1h', onStaleServed: ({ age }) => console.warn(`stale profile, ${age} ms old`) })
+  .addTimeout('2s')
+  .build();
+
+// The key defaults to operationKey: without one, nothing is remembered.
+const profile = await pipeline.execute(({ signal }) => getProfile('42', signal), { operationKey: 'profile:42' });
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `name` | `string` | `'StaleFallback'` | Strategy name. |
+| `maxAge` | `Duration` | required | How old a remembered value may be and still be served. |
+| `key` | `(context) => string \| undefined` | `context.operationKey` | Key per call. `undefined` bypasses the strategy. |
+| `maxEntries` | `number` | `1000` | Keys kept in the default in-memory store (LRU). |
+| `store` | `CacheStore` | `MemoryCacheStore` | Where values live, e.g. `RedisCacheStore` to share them. |
+| `shouldServeStale` | `(args) => boolean` (or a promise) or `PredicateBuilder` | every failure except aborts and 4xx (408/429 included) | Failures a stale value may hide. |
+| `onStaleServed` | `(args) => void` | none | Gets `key`, `value`, `age` (ms) and the hidden failure's `outcome`. |
+
+Concurrent calls are not merged. Only successful results are stored.
+
+<Aside type="caution" title="No key, no fallback">
+With neither `key` nor an `operationKey` on the call, stale fallback does nothing. Set `key: (ctx) => …` or pass `operationKey` to `execute()`.
+</Aside>
+
+## Events and errors
+
+| Telemetry event | Callback | Strategy |
+|---|---|---|
+| `OnFallback` | `onFallback` | `addFallback`, `addFallbackOn` |
+| `OnStaleServed` | `onStaleServed` | `addStaleFallback` |
+| `OnCacheMiss`, `OnCacheStoreFailed` | none | `addStaleFallback` (it is built on the cache strategy: every call is a miss) |
+
+Fallback raises no error of its own. A throwing `fallbackAction` fails the execution with its error.
+
+## Common mistakes
+
+<Aside type="tip" title="Fallback goes first">
+`addFallback(…).addRetry(…)` falls back after retries are exhausted. `addRetry(…).addFallback(…)` falls back on the first failure, so nothing is ever retried.
+</Aside>
+
+- **Expecting it to catch 4xx.** The default skips client errors. Add `shouldHandle` if a 404 should become a default value.
+- **Hiding an open circuit from your metrics.** Count fallbacks with `onFallback` or the `OnFallback` event.
+
+## Related
+
+- [Typed errors (settle / match)](/concepts/typed-errors/)
+- [Cache & coalesce](/strategies/cache/), for `staleTtl` on a real cache
+- [Circuit breaker](/strategies/circuit-breaker/)
+- [What counts as a failure](/concepts/failures/)

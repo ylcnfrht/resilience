@@ -1,0 +1,79 @@
+---
+title: Bundle sizes
+description: Measured min+gzip browser bundle sizes for typical setups, how they are measured, and how to keep your bundle small.
+sidebar:
+  order: 5
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+| What you import (min+gzip, browser) | Size | Budget |
+|---|---|---|
+| `retry()` one-liner | 4.1 KB | 4.3 KB |
+| `PipelineBuilder` + retry + timeout | 4.8 KB | 5.0 KB |
+| `PipelineBuilder` + retry + circuit breaker + timeout | 7.1 KB | 7.3 KB |
+| `createResilientFetch()` (`/fetch`, per-host breakers) | 9.1 KB | 9.3 KB |
+| `ResiliencePipelineBuilder` (every strategy) | 15.1 KB | 15.3 KB |
+
+Measured for version 0.1.2 with `scripts/size.mjs`. The package has no dependencies, so these are the whole cost.
+
+## How they are measured
+
+Each row is a tiny entry file that imports from the built ESM output and uses the API once, so nothing is tree-shaken away by accident:
+
+```ts
+// 'PipelineBuilder + retry + timeout'
+import { PipelineBuilder, retryStrategy, timeoutStrategy } from 'resilience-pipeline';
+new PipelineBuilder().add(retryStrategy()).add(timeoutStrategy('2s')).build();
+```
+
+esbuild bundles it (`bundle`, `minify`, `format: 'esm'`, `platform: 'browser'`), and the output is gzipped with Node's `zlib`. The size is that gzip length divided by 1024.
+
+The **budget** column is enforced in CI: `npm run check:size` fails when a scenario grows past it. To reproduce:
+
+```sh
+npm run build && node scripts/size.mjs
+```
+
+Your bundler, minifier and compression will give slightly different numbers; the ratios between rows hold.
+
+## Keep it small
+
+<Tabs syncKey="builder">
+<TabItem label="PipelineBuilder (smallest)">
+
+```ts twoslash
+import { PipelineBuilder, circuitBreakerStrategy, retryStrategy, timeoutStrategy } from 'resilience-pipeline';
+
+// Only retry, circuit breaker and timeout end up in the bundle.
+const pipeline = new PipelineBuilder()
+  .add(retryStrategy({ maxRetryAttempts: 3, backoffType: 'exponential' }))
+  .add(circuitBreakerStrategy({ consecutiveFailures: 5 }))
+  .add(timeoutStrategy('2s'))
+  .build();
+```
+
+</TabItem>
+<TabItem label="ResiliencePipelineBuilder (everything)">
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+// The addX() shortcuts reference every strategy, so all of them are bundled.
+const pipeline = new ResiliencePipelineBuilder()
+  .addRetry({ maxRetryAttempts: 3, backoffType: 'exponential' })
+  .addCircuitBreaker({ consecutiveFailures: 5 })
+  .addTimeout('2s')
+  .build();
+```
+
+</TabItem>
+</Tabs>
+
+- **Use `PipelineBuilder` with `xStrategy()` factories in browser and edge code.** `ResiliencePipelineBuilder` is the same builder with an `addX()` shortcut for every strategy, which is why it costs the full 15.1 KB. The two produce the same pipeline and mix freely.
+- **Use the one-liners for one-off calls.** `retry()` and `withTimeout()` build their strategy directly and skip the builder.
+- **Circuit breaker extensions are separate modules.** `circuitHealthCheck()` and `sharedCircuitState()` are only bundled when you import them.
+- **Import subpaths directly.** `resilience-pipeline/outcome` loads only the outcome helpers and error types. `/fetch`, `/axios`, `/otel`, `/prometheus`, `/redis` and the framework adapters are separate entry points and never enter a bundle that doesn't import them.
+- **On the server it rarely matters.** For Node services, prefer `ResiliencePipelineBuilder` for readability.
+
+Related: [Bundle size](/concepts/bundle-size/), [Runtimes](/concepts/runtimes/).

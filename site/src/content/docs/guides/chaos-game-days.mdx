@@ -1,0 +1,228 @@
+---
+title: Chaos game days
+description: Run a planned failure experiment safely - pre-wired chaos strategies behind flags, setGlobalChaos with a dead man's switch, what to watch and how to abort.
+sidebar:
+  order: 8
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+**The problem.** Retries, timeouts, breakers and fallbacks are configured once and then never exercised until a real outage.
+By then a timeout is longer than the load balancer's, a fallback throws, or the breaker never opens because its
+`minimumThroughput` is higher than the traffic. A **game day** finds those gaps on purpose: you inject a failure at a
+time you choose, with people watching and a way to stop it, and check that the system behaves as you claimed.
+
+The library gives you two ways to inject:
+
+| | Chaos strategies (`addChaosFault` …) | `setGlobalChaos()` |
+|---|---|---|
+| Where | In one pipeline's configuration | Every pipeline in the process |
+| Needs a deploy | Once, to pre-wire them (off by default) | No: call it at runtime |
+| Scope | Per pipeline, per execution (`enabledGenerator`, `injectionRateGenerator`) | One `filter` over every callback attempt |
+| Injects | Fault, outcome (fake result), latency, any behaviour | Fault and/or latency |
+| Telemetry | `Chaos.OnFault`, `Chaos.OnLatency`, … with the pipeline name | `Chaos.OnGlobal`, without a pipeline name |
+
+Use pre-wired strategies for the experiments you'll run again and again; use `setGlobalChaos` for one-off questions in
+staging ("what if every database call is 2 s slower?").
+
+## The runbook
+
+<Steps>
+
+1. **Write the hypothesis.** One sentence you can check: "When pricing returns 503 for 20% of calls, checkout success
+   stays above 99.5% and p99 latency below 1.5 s, because the retry hides single failures."
+
+2. **Define steady state and the abort condition.** The metrics that show the hypothesis holds (checkout success rate,
+   p99), and the line at which you stop at once (success below 98%). Look at them for a normal hour first.
+
+3. **Limit the blast radius.** Staging first. In production: synthetic traffic or an internal tenant only, one instance or
+   one pipeline, a low rate, and a fixed end time.
+
+4. **Make stopping trivial and automatic.** A flag that turns injection off without a deploy, and a timer that turns it off
+   even if nobody does.
+
+5. **Run, watch, and write down what happened.** Ramp the rate in steps (1%, 5%, 20%). Watch the `Chaos.*` events next to the
+   steady-state metrics, so you always know which errors you caused.
+
+6. **Review.** Every surprise becomes a ticket: a timeout to shorten, a fallback to fix, a breaker threshold to lower.
+   Then turn the experiment into an automated test so it can't regress.
+
+</Steps>
+
+## Pre-wired experiments behind flags
+
+Add chaos strategies **last** (innermost), so the retry, breaker, timeout and fallback above them see the injected failure as
+if it came from the dependency. Gate them twice: a flag that enables the experiment, and a rate that is zero for everything
+outside its scope.
+
+```ts twoslash title="pricing.ts"
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+declare const flags: { isOn(name: string): boolean; number(name: string, fallback: number): number };
+declare function fetchPrice(sku: string, signal: AbortSignal): Promise<number>;
+declare const lastKnownPrice: (sku: string) => number;
+// ---cut---
+/** Set on synthetic and internal-tenant requests: the only traffic a game day may touch. */
+export const CHAOS_SCOPE = 'chaos-scope';
+const rate = (flag: string) => ({ context }: { context: { properties: Map<string, unknown> } }) =>
+  context.properties.has(CHAOS_SCOPE) ? flags.number(flag, 0) : 0;
+
+export const pricing = new ResiliencePipelineBuilder<number>({ name: 'pricing' })
+  .addFallback({ fallbackAction: ({ context }) => lastKnownPrice(context.operationKey ?? '') })
+  .addRetry({ maxRetryAttempts: 2, delay: '100ms', useJitter: true })
+  .addCircuitBreaker({ failureRatio: 0.5, minimumThroughput: 20, breakDuration: '15s' })
+  .addTimeout('800ms')
+  // Experiment 1: pricing slower than our timeout.
+  .addChaosLatency({
+    enabledGenerator: () => flags.isOn('chaos.pricing.latency'),
+    injectionRateGenerator: rate('chaos.pricing.latency.rate'),
+    latency: '2s',
+  })
+  // Experiment 2: pricing answering 503.
+  .addChaosFault({
+    enabledGenerator: () => flags.isOn('chaos.pricing.errors'),
+    injectionRateGenerator: rate('chaos.pricing.errors.rate'),
+    faultGenerator: () => Object.assign(new Error('chaos: pricing 503'), { status: 503 }),
+  })
+  .build();
+```
+
+With both flags off, the strategies cost one flag lookup per call. The fault carries `status: 503`, so the default retry and
+breaker predicates treat it exactly like a real 503. A fault with `status: 400` would test something else: that client
+errors are *not* retried.
+
+Experiments worth pre-wiring for each important dependency:
+
+| Experiment | Inject | You expect |
+|---|---|---|
+| Slow dependency | `addChaosLatency` above the timeout | `TimeoutRejectedError`, retry, then fallback; inbound p99 stays under its budget. |
+| Partial failure | `addChaosFault`, 5–20% | Retries hide it; error rate seen by users barely moves. |
+| Dependency down | `addChaosFault`, 100% for scoped traffic | Breaker opens within `minimumThroughput` calls; fallback answers; no retry storm. |
+| Rate limited | `addChaosOutcome` with a 429 result, or a fault with `status: 429` and `retryAfter` | Calls wait for `retryAfter`; nothing hammers the API. |
+| Slow, then down | latency at a low rate plus faults | Adaptive limits shrink, shedding starts before the timeouts pile up. |
+
+## setGlobalChaos with a dead man's switch
+
+`setGlobalChaos` adds latency and/or a fault before **every callback attempt of every pipeline** in the process, without
+touching their configuration. It returns a function that turns it off. Wrap it so it always turns itself off:
+
+```ts twoslash title="game-day.ts"
+import { type Duration, setGlobalChaos } from 'resilience-pipeline';
+// ---cut---
+let stop: (() => void) | undefined;
+let timer: ReturnType<typeof setTimeout> | undefined;
+
+/** Starts an experiment that ends by itself after `minutes`, even if nobody calls stopGameDay(). */
+export function startGameDay(options: { keyPrefix: string; rate: number; latency?: Duration; fail?: boolean; minutes: number }) {
+  stopGameDay();
+  stop = setGlobalChaos({
+    injectionRate: options.rate,
+    latency: options.latency,
+    fault: options.fail ? () => Object.assign(new Error('chaos: game day'), { status: 503 }) : undefined,
+    // Only calls that opted in through their operationKey. Never "everything".
+    filter: (ctx) => ctx.operationKey?.startsWith(options.keyPrefix) ?? false,
+  });
+  timer = setTimeout(stopGameDay, options.minutes * 60_000);
+}
+
+export function stopGameDay() {
+  clearTimeout(timer);
+  stop?.();
+  stop = undefined;
+}
+
+// From an authenticated admin endpoint, in staging:
+startGameDay({ keyPrefix: 'db:', rate: 0.2, latency: '2s', minutes: 15 });
+```
+
+The `filter` sees the execution's context: `operationKey`, `operationName` (the `name` execute option), `properties`
+and `attemptNumber`. It does **not** see which pipeline is running, so give the calls you want to target a recognisable
+`operationKey` or property. (`operationKey` is also the default cache key, so on cached pipelines use a property instead.)
+
+<Aside type="caution" title="What setGlobalChaos does to the whole process">
+- **One configuration at a time.** It sets a single process-wide hook. A second call replaces the first, and the first
+  call's `stop()` then does nothing. Two experiments, or two test files running in parallel in one process, overwrite each other.
+- **Every pipeline, including ones you didn't write.** `createResilientFetch`, the axios integration and the inbound
+  middleware all run pipelines. A fault injected into the inbound middleware's own pipeline stops the request before your
+  handler runs and goes to the framework's error handler (Express `next(error)`, Fastify and Koa likewise). Use a `filter`
+  that excludes inbound requests (they have no `operationKey`) unless that is the experiment.
+- **Per attempt, and per nesting level.** It runs before each attempt, so a call with 3 retries is only failed if every
+  attempt is hit (at a 20% rate: 0.2⁴ = 0.16%). A pipeline called from inside another one's callback is hit at both levels.
+- **Not switched off by `pipeline.disable()`.** The kill switch bypasses strategies, but the global hook still runs before the callback.
+- **One copy of the library.** If the app loads two copies (an ESM and a CommonJS build, or two versions), each has its own hook.
+- **`Chaos.OnGlobal` events carry no pipeline name**, only the context. Log the `operationKey` to tell experiments apart.
+</Aside>
+
+## Watching the experiment
+
+Count what you inject next to what users see. `onTelemetry` gets every event in the process:
+
+```ts twoslash
+import { onTelemetry } from 'resilience-pipeline';
+declare const metrics: { increment(name: string, labels: Record<string, string>): void };
+// ---cut---
+const off = onTelemetry(({ event, source, context }) => {
+  if (event.startsWith('Chaos.')) {
+    metrics.increment('chaos_injected_total', {
+      event,
+      target: source.pipelineName ?? context.operationKey ?? 'unknown',
+    });
+  }
+  // The reactions you expect to see during the experiment.
+  if (event === 'OnRetry' || event === 'OnTimeout' || event === 'OnCircuitOpened' || event === 'OnFallback') {
+    metrics.increment('resilience_reaction_total', { event, pipeline: source.pipelineName ?? 'unknown' });
+  }
+});
+```
+
+If you use the [OpenTelemetry](/integrations/opentelemetry/) or [Prometheus](/integrations/prometheus/) integration, the
+`Chaos.*` events are already counted in the strategy events metric. Put that panel on the game-day dashboard.
+
+What to look for:
+
+- **Injected, but no reaction.** Faults injected and no `OnRetry`: the retry predicate doesn't match the error. Latency
+  injected and no `OnTimeout`: the timeout is longer than the injected latency.
+- **Reaction, but users still affected.** Timeouts fire, yet inbound p99 climbs: the retries add up to more than the request
+  budget. Shorten per-attempt timeouts or retry less.
+- **Breaker never opens.** Scoped traffic is below `minimumThroughput` within `samplingDuration`. Either the breaker is tuned for
+  more traffic than you have, or the experiment's scope is too small to test it.
+
+## Aborting
+
+Have the stop actions written down before you start, fastest first:
+
+1. Turn the experiment flag off (pre-wired strategies) or call `stopGameDay()` (global chaos).
+2. If an instance is stuck in a bad state (circuit open on a healthy dependency), close it through its
+   `CircuitBreakerManualControl`, or restart the instance.
+3. The timer ends a global experiment by itself; a restart ends it too, since the hook lives in memory.
+
+## From game day to test
+
+Every experiment that found something should become a test, so the fix can't regress. In tests, `injectionRate: 1` makes
+injection deterministic:
+
+```ts twoslash
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+test('pricing answers from the fallback when pricing is down', async () => {
+  const pricing = new ResiliencePipelineBuilder<number>()
+    .addFallback({ fallbackValue: -1 })
+    .addRetry({ maxRetryAttempts: 2, delay: 0 })
+    .addChaosFault({ injectionRate: 1, fault: Object.assign(new Error('chaos: pricing 503'), { status: 503 }) })
+    .build();
+
+  assert.equal(await pricing.execute(() => 42), -1);
+});
+```
+
+Prefer the per-pipeline strategies in tests over `setGlobalChaos`: test runners run files in parallel, and the global hook
+is shared by everything in the process. For injected latency, use a `FakeTimeProvider` so a 2 s delay takes no time (see
+[testing](/guides/testing/)).
+
+## Related
+
+- [Chaos](/strategies/chaos/): every option and event
+- [Telemetry](/concepts/telemetry/)
+- [Testing resilience code](/guides/testing/)
+- [Load shedding](/guides/load-shedding/): what should happen when the slow-dependency experiment succeeds

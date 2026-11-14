@@ -1,0 +1,335 @@
+---
+title: Circuit breaker
+description: Stop calling a failing dependency for a while, then probe it. Ratio, consecutive or custom rules, manual control, persistence and shared state.
+sidebar:
+  order: 3
+---
+import BreakerStateMachine from '../../../components/BreakerStateMachine.tsx';
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+A circuit breaker watches the failures of one dependency. When they cross a threshold it **opens**: calls fail at once with `BrokenCircuitError` instead of piling up on a service that can't answer. After a break it lets a probe through, and closes again if the probe succeeds.
+
+Use one breaker per downstream dependency, shared by every call to it (build the pipeline once, or use the [registry](/concepts/pipelines/)). A breaker created per request never sees enough failures to open. Don't use it for errors that say nothing about the dependency's health, such as validation errors; the default predicate already ignores 4xx.
+
+## Example
+
+<Tabs syncKey="builder">
+<TabItem label="ResiliencePipelineBuilder">
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const payments = new ResiliencePipelineBuilder()
+  .addCircuitBreaker({
+    failureRatio: 0.5,         // open when half the calls fail…
+    minimumThroughput: 20,     // …once at least 20 calls were seen…
+    samplingDuration: '30s',   // …in the last 30 s
+    breakDuration: '10s',      // stay open for 10 s, then probe
+  })
+  .build();
+
+const res = await payments.execute(({ signal }) => fetch('https://pay.example.com/charge', { signal }));
+```
+
+</TabItem>
+<TabItem label="PipelineBuilder (smallest bundle)">
+
+```ts twoslash
+import { PipelineBuilder, circuitBreakerStrategy } from 'resilience-pipeline';
+
+const payments = new PipelineBuilder()
+  .add(circuitBreakerStrategy({ failureRatio: 0.5, minimumThroughput: 20, samplingDuration: '30s', breakDuration: '10s' }))
+  .build();
+
+const res = await payments.execute(({ signal }) => fetch('https://pay.example.com/charge', { signal }));
+```
+
+</TabItem>
+</Tabs>
+
+For low traffic, `consecutiveFailures` is simpler: `addCircuitBreaker({ consecutiveFailures: 5 })` opens after 5 failures in a row.
+
+## How it works
+
+<BreakerStateMachine client:visible />
+
+| State | Calls | Leaves when |
+|---|---|---|
+| `closed` | Pass through. Each outcome is recorded as a success, a failure or ignored. | The opening rule fires after a failure → `open`. |
+| `open` | Rejected with `BrokenCircuitError` (`retryAfter` = ms left). | The break is over and a call arrives → `half-open`. There is no timer: the next call triggers it. |
+| `half-open` | Up to `halfOpenMaxCalls` probes pass; others are rejected (`retryAfter: 0`). | All probes finished → `closed` if they were healthy enough, else `open` again. A probe slower than `halfOpenMaxWait` counts as failed → `open`. |
+| `isolated` | Rejected with `IsolatedCircuitError`. | Manual close only. |
+
+**What counts.** An outcome is a failure when `shouldHandle` matches it. The default matches errors except 4xx (408 and 429 do count), aborts and rejections. Successes count as successes. Everything else, such as a 404, is **ignored**: neither a failure nor a success. Rejections from other strategies (a full limiter, another open circuit) are never counted, whatever `shouldHandle` says.
+
+**Stale calls.** A call that started before the circuit changed state can't affect the new state when it finishes. A slow failure from before a reset won't reopen the circuit.
+
+**Probes.** With the default `halfOpenMaxCalls: 1`, one probe decides. With more, the circuit closes when the probes' failure ratio stays below `failureRatio`, or, with `halfOpenSuccessThreshold`, when at least that fraction succeeded. An ignored probe outcome frees its slot for another probe.
+
+## Opening rules
+
+Pick one rule; `consecutiveFailures` can be combined with the others.
+
+| Rule | Options | Opens when | Good for |
+|---|---|---|---|
+| Ratio, time window (default) | `failureRatio`, `minimumThroughput`, `samplingDuration`, `minimumRps` | `total ≥ minimumThroughput` and `failures / total ≥ failureRatio` over the last `samplingDuration` | Steady, high traffic. |
+| Ratio, count window | `failureRatio`, `minimumThroughput`, `samplingCount` | Same, over the last `samplingCount` calls | Low or bursty traffic. |
+| Consecutive | `consecutiveFailures` | That many failures in a row (a success resets the count) | Low traffic, simple setups. |
+| Custom | `breaker: CircuitBreakerPolicy` | Your `shouldOpen(now)` returns `true` | Anything else. |
+
+- Setting `consecutiveFailures` **without** `failureRatio` turns the ratio rule off. Set both and either one opens the circuit.
+- The time window is kept in 10 buckets, so old calls drop out in steps of `samplingDuration / 10`.
+- `minimumRps` (time window only) also requires that many calls per second on average over the window, so a quiet period's few failures can't open the circuit.
+
+<Aside type="caution" title="Count windows and minimumThroughput">
+`minimumThroughput` defaults to 100. With `samplingCount` below 100 you must lower it too, or the breaker throws `RangeError` on `build()`: the threshold could never be reached.
+</Aside>
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+// The last 20 calls; open at 50% failures once 10 were recorded.
+const pipeline = new ResiliencePipelineBuilder()
+  .addCircuitBreaker({ samplingCount: 20, minimumThroughput: 10, failureRatio: 0.5 })
+  .build();
+```
+
+### Custom policy
+
+A `CircuitBreakerPolicy` replaces `failureRatio`, `minimumThroughput` and the window (`consecutiveFailures` still applies). Only calls made while closed are recorded. Use one instance per breaker; it holds that breaker's history.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, type CircuitBreakerPolicy } from 'resilience-pipeline';
+
+/** Open after 5 failures within one minute, whatever the success count. */
+class FailuresPerMinute implements CircuitBreakerPolicy {
+  #failures: number[] = [];
+  record(failed: boolean, now: number) {
+    if (failed) this.#failures.push(now);
+  }
+  shouldOpen(now: number) {
+    this.#failures = this.#failures.filter((t) => now - t < 60_000);
+    return this.#failures.length >= 5;
+  }
+  reset() {
+    this.#failures = [];
+  }
+}
+
+const pipeline = new ResiliencePipelineBuilder().addCircuitBreaker({ breaker: new FailuresPerMinute() }).build();
+```
+
+| Method | Required | Called |
+|---|---|---|
+| `record(failed, now)` | yes | For every success or failure while closed. `now` comes from the pipeline's time provider. |
+| `shouldOpen(now)` | yes | After each recorded failure, outside warm-up. |
+| `reset()` | yes | When the circuit closes. |
+| `metrics(now)` | no | For `stateProvider.metrics` and `breakDurationGenerator`. Zeros when absent. |
+| `snapshot()` | no | JSON history stored as `CircuitSnapshot.window`. |
+| `restore(state)` | no | Receives `initialState.window`. It may come from another policy or be malformed: validate it. |
+
+## Break duration
+
+`breakDuration` (default 5 s) is how long the circuit stays open. For a break that grows while the dependency stays down, use `breakDurationGenerator`. It receives the window metrics (`total`, `failureCount`, `failureRate`), `halfOpenAttempts` (failed half-open rounds in a row) and `context`:
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+// 5 s, 10 s, 20 s, … up to 2 min, reset when the circuit closes.
+const pipeline = new ResiliencePipelineBuilder()
+  .addCircuitBreaker({
+    consecutiveFailures: 5,
+    breakDurationGenerator: ({ halfOpenAttempts }) => Math.min(5_000 * 2 ** halfOpenAttempts, 120_000),
+  })
+  .build();
+```
+
+If the generator throws or returns an invalid duration, `breakDuration` is used instead.
+
+## Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `name` | `string` | `'CircuitBreaker'` | Strategy name in telemetry and `getStrategy()`. |
+| `shouldHandle` | `(args) => boolean` (or a promise) or `PredicateBuilder` | transient errors | Which outcomes are failures. Non-matching errors are ignored, not successes. |
+| `failureRatio` | `number` in (0, 1] | `0.1` | Failure ratio that opens the circuit. Also the probe threshold in half-open. |
+| `consecutiveFailures` | integer ≥ 1 | none | Open after this many failures in a row. Alone, it disables the ratio rule. |
+| `minimumThroughput` | integer ≥ 1 | `100` | Calls in the window before the ratio counts. |
+| `minimumRps` | `number` > 0 | none | Time window only: minimum average calls per second before the ratio counts. |
+| `samplingDuration` | `Duration` | `30000` (30 s) | Time window length. Ignored when `samplingCount` is set. |
+| `samplingCount` | integer ≥ 1 | none | Count window: the last N recorded calls. |
+| `breakDuration` | `Duration` | `5000` (5 s) | How long the circuit stays open. Must be > 0. |
+| `breakDurationGenerator` | `(args: BreakDurationArgs) => Duration` (or a promise) | none | Per-opening break duration. |
+| `halfOpenMaxCalls` | integer ≥ 1 | `1` | Probes let through while half-open. |
+| `halfOpenSuccessThreshold` | `number` in (0, 1] | none | Fraction of finished probes that must succeed to close. `0.8` with 5 probes needs 4. |
+| `halfOpenMaxWait` | `Duration` | `30000` (30 s) | A probe running longer counts as failed and reopens the circuit. |
+| `warmUpDuration` | `Duration` | `0` | After `build()`, failures are recorded but can't open the circuit for this long. |
+| `breaker` | `CircuitBreakerPolicy` | built-in window | Custom opening rule, see [above](#custom-policy). |
+| `manualControl` | `CircuitBreakerManualControl` | none | Isolate or close by hand. |
+| `stateProvider` | `CircuitBreakerStateProvider` | none | Read state, metrics and snapshots. |
+| `initialState` | `CircuitSnapshot` | none | Resume from a saved snapshot. |
+| `extensions` | `CircuitBreakerExtension[]` | none | Background behaviour: health checks, shared state. |
+| `onOpened` | `(args: OnCircuitOpenedArgs) => void` | none | `outcome`, `breakDuration`, `isManual`, `context`. |
+| `onClosed` | `(args: OnCircuitClosedArgs) => void` | none | `outcome`, `isManual`, `context`. |
+| `onHalfOpened` | `({ context }) => void` | none | The first call after the break. |
+| `onRejected` | `(args: OnCircuitRejectedArgs) => void` | none | Every refused call: `context`, `state`, `retryAfter`. The "short-circuited" count. |
+
+Invalid values throw `RangeError` on `build()`. Callbacks may be async and are awaited.
+
+## Manual control
+
+`CircuitBreakerManualControl` holds circuits open (isolated) or closes them, for example from an admin endpoint during an incident. One control can drive several breakers.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, CircuitBreakerManualControl } from 'resilience-pipeline';
+
+const control = new CircuitBreakerManualControl(); // `new CircuitBreakerManualControl(true)` starts isolated
+const pipeline = new ResiliencePipelineBuilder().addCircuitBreaker({ manualControl: control }).build();
+
+const releaseDeploy = await control.isolate();
+const releaseIncident = await control.isolate();
+
+await releaseDeploy();   // still isolated: the incident hold remains
+await releaseIncident(); // last hold released → closed
+control.isIsolated;      // false
+
+await control.close();   // closes at once and drops every outstanding hold
+```
+
+Isolations stack: the circuit stays isolated until every `isolate()` has been released, or `close()` is called. Releasing twice does nothing. While isolated, `trip()` and states adopted from `sharedCircuitState` are ignored.
+
+## Reading state
+
+```ts twoslash
+import { ResiliencePipelineBuilder, CircuitBreakerStateProvider, type CircuitBreakerStrategy } from 'resilience-pipeline';
+
+const state = new CircuitBreakerStateProvider();
+const pipeline = new ResiliencePipelineBuilder().addCircuitBreaker({ stateProvider: state }).build();
+
+state.circuitState; // 'closed' | 'open' | 'half-open' | 'isolated'
+state.metrics;      // { total, failureCount, failureRate } of the current window
+state.isWarmingUp;  // true during warmUpDuration
+state.snapshot();   // plain JSON, see Persistence
+
+// Or the live strategy itself:
+const breaker = pipeline.getStrategy<CircuitBreakerStrategy<any>>('CircuitBreaker');
+breaker?.lastFailure;  // the last outcome counted as a failure
+await breaker?.trip(); // open now for the break duration; half-opens by itself afterwards
+await breaker?.reset(); // close now and clear the window
+```
+
+A state provider belongs to one breaker; attaching it to a second one throws. `getStrategy()` takes the strategy's `name` (default `'CircuitBreaker'`) or its class name. The [registry](/concepts/pipelines/) lists every breaker with `registry.circuitBreakers()`.
+
+## Persistence
+
+Serverless functions and restarts lose in-memory state. Save `stateProvider.snapshot()` and pass it back as `initialState`. The snapshot includes the rolling window, so the failure history survives too.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, CircuitBreakerStateProvider, type CircuitSnapshot } from 'resilience-pipeline';
+declare const kv: { get(key: string): Promise<CircuitSnapshot | null>; put(key: string, value: string): Promise<void> };
+// ---cut---
+const state = new CircuitBreakerStateProvider();
+const save = () => kv.put('breaker:payments', JSON.stringify(state.snapshot()));
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addCircuitBreaker({
+    stateProvider: state,
+    initialState: (await kv.get('breaker:payments')) ?? undefined,
+    onOpened: save,
+    onClosed: save,
+  })
+  .build();
+```
+
+| `CircuitSnapshot` field | Meaning |
+|---|---|
+| `state` | `'closed' \| 'open' \| 'half-open' \| 'isolated'`. A saved `half-open` resumes as open and due for a probe (the probe in flight is gone). |
+| `openUntil` | Epoch ms when an open circuit lets a probe through. |
+| `consecutiveFailures`, `halfOpenAttempts` | Counters. |
+| `updatedAt` | Epoch ms of the last state change; the newest wins in a shared store. |
+| `window` | The policy's history. Malformed data is skipped. |
+
+<Aside type="caution">
+A snapshot saved while `isolated` restores as isolated. Only a `manualControl` close or `reset()` lifts it, so pass a `manualControl` if you persist isolation.
+</Aside>
+
+## Extensions
+
+Extensions add background behaviour. They live in separate modules, so you only bundle what you use. `pipeline.dispose()` stops them.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, circuitHealthCheck, sharedCircuitState, MemoryCircuitStateStore } from 'resilience-pipeline';
+declare const db: { ping(signal: AbortSignal): Promise<void> };
+// ---cut---
+const store = new MemoryCircuitStateStore(); // RedisCircuitStateStore across servers
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addCircuitBreaker({
+    consecutiveFailures: 5,
+    extensions: [
+      circuitHealthCheck({ check: (signal) => db.ping(signal), interval: '10s' }),
+      sharedCircuitState({ store, key: 'payments-db' }),
+    ],
+  })
+  .build();
+
+// on shutdown
+pipeline.dispose();
+```
+
+**`circuitHealthCheck`** probes the dependency every `interval` while the circuit is closed. A check that throws, rejects, returns `false` or takes longer than `timeout` opens the circuit for its break duration (reported as `OnHealthCheckFailed`). Its timers don't keep the process alive.
+
+| Option | Type | Default |
+|---|---|---|
+| `check` | `(signal: AbortSignal) => unknown` (or a promise) | required |
+| `interval` | `Duration` | required |
+| `timeout` | `Duration` | `interval` |
+
+**`sharedCircuitState`** syncs the state with other instances through a `CircuitStateStore`: one instance seeing the dependency fail opens the circuit for all of them. It writes on every local state change and reads at start and every `syncInterval`. The newest `updatedAt` wins. The rolling window stays local: each instance judges its own traffic.
+
+| Option | Type | Default |
+|---|---|---|
+| `store` | `CircuitStateStore` (`get(key)`, `set(key, snapshot)`) | required |
+| `key` | `string`, one per logical breaker | required |
+| `syncInterval` | `Duration` | `'5s'` |
+
+Stores: `MemoryCircuitStateStore` (one process, tests) and `RedisCircuitStateStore` from `resilience-pipeline/redis` (see [Multi-instance with Redis](/guides/multi-instance/)). A failing store never fails calls; it is reported as `OnCircuitStoreError`.
+
+## Events and errors
+
+| Telemetry event | Callback | When |
+|---|---|---|
+| `OnCircuitOpened` | `onOpened` | Opened by the rule, a failed probe, `trip()`, a health check (`isManual: false`) or isolated (`isManual: true`, `breakDuration: Infinity`). |
+| `OnCircuitClosed` | `onClosed` | Closed after healthy probes (`isManual: false`), or by `reset()` / manual control (`isManual: true`). |
+| `OnCircuitHalfOpened` | `onHalfOpened` | The first call after the break. |
+| `OnCircuitRejected` | `onRejected` | Every call refused while open, half-open (slots full) or isolated. |
+| `OnHalfOpenProbeTimedOut` | none | A probe ran longer than `halfOpenMaxWait`. |
+| `OnHealthCheckFailed` | none | A `circuitHealthCheck` failed. |
+| `OnCircuitStateSynced` | none | `sharedCircuitState` adopted a newer remote state. |
+| `OnCircuitStoreError` | none | The shared store threw. |
+
+| Error | `code` | HTTP | Notes |
+|---|---|---|---|
+| `BrokenCircuitError` | `CIRCUIT_OPEN` | 503 | `retryAfter`: ms until a probe is allowed (`0` while half-open slots are taken). `cause`: the last failure's error. |
+| `IsolatedCircuitError` | `CIRCUIT_ISOLATED` | 503 | Extends `BrokenCircuitError`; no `retryAfter`. |
+
+Both are rejections (`isRejection(e)` is `true`, guard: `isBrokenCircuitError(e)`): [retry never retries them](/strategies/retry/#open-circuits-are-never-retried), other breakers don't count them, and the default [fallback](/strategies/fallback/) handles them. With [typed errors](/concepts/typed-errors/), `Outcome.match` needs `CIRCUIT_OPEN` and `CIRCUIT_ISOLATED` branches.
+
+## Common mistakes
+
+<Aside type="tip" title="Retry outside, breaker inside">
+`addRetry().addCircuitBreaker()` sends every attempt through the breaker, and retry stops as soon as the circuit opens. The other order records one outcome per whole retry sequence, so the breaker sees fewer failures and opens later.
+</Aside>
+
+- **Defaults that never open on modest traffic.** Polly's defaults need 100 calls in 30 s. Lower `minimumThroughput`, or use `consecutiveFailures`.
+- **A breaker per request.** Build the pipeline once per dependency and reuse it.
+- **Counting results.** `fetch` resolves with a 503 `Response`. Use `shouldHandle: new PredicateBuilder<Response>().handleResult((r) => r.status >= 500)`.
+
+## Related
+
+- [Retry](/strategies/retry/)
+- [Fallback](/strategies/fallback/), for what to return while open
+- [Multi-instance with Redis](/guides/multi-instance/)
+- [Serverless & persistence](/guides/serverless/)
+- [Migrating from opossum](/migration/opossum/)

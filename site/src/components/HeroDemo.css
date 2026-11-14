@@ -1,0 +1,21 @@
+.rp-hero { display: grid; gap: 0.9rem; }
+.rp-hero-col h4 { margin-bottom: 0.35rem; }
+.rp-hero-ticks { display: grid; grid-template-columns: repeat(20, 1fr); gap: 3px; }
+.rp-hero-tick { display: inline-block; height: 26px; min-width: 6px; border-radius: 3px; background: var(--c); transition: background-color 0.2s ease, transform 0.2s ease; vertical-align: middle; }
+.rp-hero-legend .rp-hero-tick { height: 0.7rem; width: 0.45rem; margin-left: 0.5rem; }
+.rp-hero-tick.is-pending { --c: transparent; box-shadow: inset 0 0 0 1px var(--sl-color-gray-5); }
+.rp-hero-tick.is-ok { --c: var(--rp-green); }
+.rp-hero-tick.is-retried { --c: var(--rp-blue); }
+.rp-hero-tick.is-fallback { --c: var(--d-fallback); }
+.rp-hero-tick.is-slow { --c: var(--rp-amber); }
+.rp-hero-tick.is-failed { --c: var(--rp-red); }
+.rp-hero-ticks .rp-hero-tick:not(.is-pending) { animation: rp-hero-in 0.25s ease-out; }
+@keyframes rp-hero-in { from { transform: scaleY(0.3); } }
+.rp-hero-rate { margin: 0.35rem 0 0; min-height: 1.4em; font-size: 0.85rem; color: var(--d-muted); }
+.rp-hero-rate b { font-family: var(--sl-font-mono); font-size: 1.1rem; color: var(--rp-red); }
+.rp-hero-rate b[data-good] { color: var(--rp-green); }
+.rp-hero-foot { justify-content: space-between; font-size: 0.75rem; color: var(--d-muted); }
+@media (prefers-reduced-motion: reduce) {
+  .rp-hero-tick { transition: none; }
+  .rp-hero-ticks .rp-hero-tick:not(.is-pending) { animation: none; }
+}

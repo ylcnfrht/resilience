@@ -1,0 +1,291 @@
+---
+title: From tenace
+description: Port @julr/tenace policies to resilience-pipeline. Reverse the strategy order, key Outcome.match on error codes instead of _tag, and map each option.
+sidebar:
+  order: 6
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+**Who this is for:** projects on `@julr/tenace` that want hedging, adaptive concurrency, a shipped Redis breaker store, framework middleware, or CommonJS and Node 20 support.
+
+The two libraries cover much of the same ground and use similar words: `execute()` and `settle()`, typed errors, fallbacks that remove errors from the type, `waitFor`, batches, a virtual clock. Most of the port is renaming. Two changes need care: **the order is reversed**, and **typed errors are keyed by `code`, not `_tag`**.
+
+<Aside type="caution" title="Strategy order is reversed">
+In tenace, the first strategy added is the **innermost**. Here it is the **outermost** (as in Polly and cockatiel). `withTimeout('1s').withRetry(…)` (a timeout per attempt) becomes `addRetry(…).addTimeout('1s')`. Port each chain by reading it backwards.
+</Aside>
+
+## Concept mapping
+
+| tenace 2 | resilience-pipeline |
+|---|---|
+| `Tenace.policy({ name })` | `new ResiliencePipelineBuilder({ name })` … `.build()` |
+| `Tenace.call(fn).withX().execute()` | build the pipeline once, then `pipeline.execute(fn)` |
+| `.with(otherPolicy)` | `.addPipeline(otherPipeline)` (state is shared) |
+| `.with(new CircuitBreaker(…))` shared between policies | a pipeline holding the breaker, added with `addPipeline()` |
+| `policy.execute(fn)` / `policy.settle(fn)` | `pipeline.execute(fn)` / `pipeline.settle(fn)` |
+| `withTimeout(d)` | `addTimeout(d)` |
+| `withTimeout(d, { mode: 'cooperative' })` | `addTimeout({ timeout: d, cooperative: true })` |
+| `withRetry({ retries })` | `addRetry({ maxRetryAttempts })` |
+| `delay: backoff.exponential({ base, max })` | `delayGenerator: backoff.exponential({ delay, maxDelay, useJitter: 'full' })` |
+| `retryOn: ['TimeoutError']` / `retryIf` | `shouldHandle: ({ outcome }) => …` |
+| `retryIfValue` | `shouldHandle` on `outcome.ok`, or `PredicateBuilder.handleResult()` |
+| `budget` | `budget: new RetryBudget(…)` |
+| `respectRetryAfter`, `maxDelay` | `respectRetryAfter`, `maxDelay` |
+| `idempotent` (retry option or `execute` option) | `execute(fn, { idempotent: false })` |
+| `withCircuitBreaker({ trip: { consecutive: 5 } })` | `addCircuitBreaker({ consecutiveFailures: 5 })` |
+| `trip: { rate: 0.5, calls: 20 }` | `failureRatio: 0.5, samplingCount: 20, minimumThroughput: 20` |
+| `trip: { rate: 0.5, duration: '30s' }` | `failureRatio: 0.5, samplingDuration: '30s'` |
+| `openFor` (number or function) | `breakDuration` / `breakDurationGenerator` |
+| `halfOpen: { permits, successes, maxWait }` | `halfOpenMaxCalls`, `halfOpenSuccessThreshold` (a fraction), `halfOpenMaxWait` |
+| `classify` | `shouldHandle` (failure or ignored) |
+| `onStateChange` | `onOpened` / `onClosed` / `onHalfOpened` |
+| `store` | `stateProvider` + `initialState`, or `sharedCircuitState` / Redis store |
+| `breaker.isolate()` | `manualControl.isolate()` (both return a release function) |
+| `withBulkhead({ concurrency, queue, maxWait })` | `addConcurrencyLimiter({ permitLimit, queueLimit, queueTimeout })` |
+| `withRateLimit(…)` | `addRateLimiter` (token bucket), `addFixedWindowRateLimiter`, `addSlidingWindowRateLimiter`, `addPartitionedRateLimiter` |
+| `withLock(…)` | `addLock({ key })` |
+| `withDedupe()` | `addCoalesce()` |
+| `withCache(…)` | `addCache({ ttl, key })` |
+| `withStaleFallback(…)` | `addStaleFallback({ maxAge, key })` |
+| `withFallback(handler)` | `addFallback({ fallbackAction })` |
+| `withFallbackOn(tags, handler)` | `addFallbackOn(codes, fallbackAction)` |
+| `withFallbackWhen(when, handler)` | `addFallback({ shouldHandle, fallbackAction })` |
+| `mapError(mapper)` | `addMapError(mapper)` |
+| `withChaos(…)` | `addChaosFault` / `addChaosLatency` / `addChaosOutcome` / `addChaosBehavior` |
+| `Result.ok(v)` / `Result.err(e)` | `Outcome.fromResult(v)` / `Outcome.fromError(e)` |
+| `Result.match(r, { ok, TimeoutError, … })` | `Outcome.match(o, { ok, TIMEOUT, … })` |
+| `Result.try(…)` | `Outcome.try(…)` |
+| `result.value` | `outcome.result` |
+| `class X extends TenaceError { _tag = 'X' }` | `class X extends Error { readonly code = 'X' as const }` |
+| registered foreign Result | `registerResultAdapter(name, { is, toOutcome })` |
+| `Tenace.all(tasks, { policy }).execute()` | `all(tasks, { pipeline })` |
+| `Tenace.map(items, fn, { policy, concurrency }).settle()` | `map(items, fn, { pipeline, concurrency, stopOnError: false })` |
+| `waitFor(fn, { interval, timeout })` | `waitFor(fn, { interval, timeout })` |
+| `TestClock` + `{ clock }` | `FakeTimeProvider` + `{ timeProvider }` |
+| `Tenace.instrument(openTelemetry())` | `instrumentOpenTelemetry()` from `resilience-pipeline/otel` |
+| `Tenace.instrument(…)` / `instrumentation` option | `instrument(…)` / builder option `instrumentation` |
+| `listener(event => …)` | `onTelemetry(event => …)` |
+
+### Error tags and codes
+
+| tenace `_tag` | resilience-pipeline `code` | Class |
+|---|---|---|
+| `TimeoutError` | `TIMEOUT` | `TimeoutRejectedError` |
+| `CircuitOpenError` | `CIRCUIT_OPEN`, `CIRCUIT_ISOLATED` | `BrokenCircuitError`, `IsolatedCircuitError` |
+| `BulkheadFullError` | `BULKHEAD_FULL` | `BulkheadRejectedError` |
+| `RateLimitError` | `RATE_LIMITED` | `RateLimiterRejectedError` |
+| `LockNotAcquiredError` | `LOCK_NOT_ACQUIRED` | `LockNotAcquiredError` |
+| `UnexpectedError` | `UNEXPECTED` | `UnexpectedError` |
+
+## Side by side
+
+### A typed policy
+
+<Tabs syncKey="tenace">
+<TabItem label="tenace">
+
+```ts
+import { Result, Tenace } from '@julr/tenace';
+
+const policy = Tenace.policy({ name: 'users.get' })
+  .withTimeout('1s')
+  .withRetry({ retries: 3, retryOn: ['TimeoutError'] })
+  .withCircuitBreaker({ trip: { consecutive: 5 }, openFor: '30s' });
+
+const result = await policy.settle(({ signal }) => fetchUser(id, { signal }));
+
+const message = Result.match(result, {
+  ok: (user) => `Hello ${user.name}`,
+  TimeoutError: () => 'The users API is slow, try again',
+  CircuitOpenError: (error) => `The users API is down, retry in ${error.retryAfterMs}ms`,
+  UnexpectedError: (error) => `Something broke: ${String(error.cause)}`,
+});
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+type User = { name: string };
+declare function fetchUser(id: string, init: { signal: AbortSignal }): Promise<User>;
+declare const id: string;
+// ---cut---
+import { Outcome, ResiliencePipelineBuilder, isTimeoutError } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder({ name: 'users.get' })
+  .addCircuitBreaker({ consecutiveFailures: 5, breakDuration: '30s' })
+  .addRetry({
+    maxRetryAttempts: 3,
+    delay: '100ms',
+    backoffType: 'exponential',
+    useJitter: 'full',
+    shouldHandle: ({ outcome }) => !outcome.ok && isTimeoutError(outcome.error),
+  })
+  .addTimeout('1s')
+  .build();
+
+const result = await pipeline.settle(({ signal }) => fetchUser(id, { signal }));
+
+const message = Outcome.match(result, {
+  ok: (user) => `Hello ${user.name}`,
+  TIMEOUT: () => 'The users API is slow, try again',
+  CIRCUIT_OPEN: (error) => `The users API is down, retry in ${error.retryAfter}ms`,
+  CIRCUIT_ISOLATED: () => 'The users API is switched off',
+  UNEXPECTED: (error) => `Something broke: ${String(error.cause)}`,
+});
+```
+
+</TabItem>
+</Tabs>
+
+The chain is reversed, and the retry gets tenace's backoff explicitly (exponential from 100 ms, full jitter); ours defaults to a constant 2 s. An isolated circuit has its own code, so `match` asks for a handler for it.
+
+### Your own errors and fallbacks
+
+<Tabs syncKey="tenace">
+<TabItem label="tenace">
+
+```ts
+import { Result, Tenace, TenaceError } from '@julr/tenace';
+
+class NotFound extends TenaceError {
+  readonly _tag = 'NotFound' as const;
+  readonly code = 'E_NOT_FOUND' as const;
+}
+
+async function findUser(id: string): Promise<Result<User, NotFound>> {
+  const user = await db.find(id);
+  return user ? Result.ok(user) : Result.err(new NotFound(`No user ${id}`));
+}
+
+const user = await Tenace.call(() => findUser(id))
+  .withTimeout('1s')
+  .withFallbackOn(['NotFound'], () => null)
+  .execute();
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+type User = { name: string };
+declare const db: { find(id: string): Promise<User | undefined> };
+declare const id: string;
+// ---cut---
+import { Outcome, ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+class NotFound extends Error {
+  readonly code = 'NOT_FOUND' as const;
+}
+
+async function findUser(id: string): Promise<Outcome<User, NotFound>> {
+  const user = await db.find(id);
+  return user ? Outcome.fromResult(user) : Outcome.fromError(new NotFound(`No user ${id}`));
+}
+
+const pipeline = new ResiliencePipelineBuilder<User | null>()
+  .addFallbackOn(['NOT_FOUND'], () => null)
+  .addTimeout('1s')
+  .build();
+
+const outcome = await pipeline.settle(() => findUser(id));
+```
+
+</TabItem>
+</Tabs>
+
+`settle()` understands a returned `Outcome`, so `NOT_FOUND` joins the error type and `addFallbackOn` takes it out again. `execute()` does not unwrap a returned `Outcome`: use `settle()` (or `Outcome.unwrap()`) when your callback returns one.
+
+### A shared breaker
+
+<Tabs syncKey="tenace">
+<TabItem label="tenace">
+
+```ts
+import { CircuitBreaker, Tenace } from '@julr/tenace';
+
+const paymentsBreaker = new CircuitBreaker({ name: 'payments', trip: { rate: 0.5, calls: 20 } });
+const paymentsApi = Tenace.policy().withTimeout('2s').with(paymentsBreaker);
+
+const charge = Tenace.policy().with(paymentsApi).withFallbackOn(['CircuitOpenError'], () => 'queued' as const);
+const refund = Tenace.policy().with(paymentsApi).withRetry({ retries: 2 });
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const paymentsApi = new ResiliencePipelineBuilder({ name: 'payments' })
+  .addCircuitBreaker({ failureRatio: 0.5, samplingCount: 20, minimumThroughput: 20 })
+  .addTimeout('2s')
+  .build();
+
+const charge = new ResiliencePipelineBuilder()
+  .addFallbackOn(['CIRCUIT_OPEN', 'CIRCUIT_ISOLATED'], () => 'queued' as const)
+  .addPipeline(paymentsApi)
+  .build();
+const refund = new ResiliencePipelineBuilder().addRetry({ maxRetryAttempts: 2 }).addPipeline(paymentsApi).build();
+```
+
+</TabItem>
+</Tabs>
+
+### Tests on a virtual clock
+
+<Tabs syncKey="tenace">
+<TabItem label="tenace">
+
+```ts
+import { TestClock } from '@julr/tenace/testing';
+
+const clock = new TestClock();
+const policy = Tenace.policy().withTimeout('1s').withRetry({ retries: 2, delay: '10s' });
+
+const done = policy.settle(() => new Promise<string>(() => {}), { clock });
+await clock.runAll();
+const result = await done; // a TimeoutError
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { FakeTimeProvider } from 'resilience-pipeline/testing';
+
+const time = new FakeTimeProvider();
+const pipeline = new ResiliencePipelineBuilder().addRetry({ maxRetryAttempts: 2, delay: '10s' }).addTimeout('1s').build();
+
+const done = pipeline.settle(() => new Promise<string>(() => {}), { timeProvider: time });
+await time.runAll();
+const result = await done; // TIMEOUT
+```
+
+</TabItem>
+</Tabs>
+
+A per-execution `timeProvider` drives retry delays, timeouts and hedging delays. Stateful strategies (breaker, limiters, cache, lock) keep the pipeline's clock; pass `timeProvider` to the builder to fake those too.
+
+## Behavioural differences to watch
+
+- **Retry defaults.** tenace retries every error, exponential from 100 ms with full jitter. Ours (Polly's): 3 retries, a constant 2 s, and only transient errors: 4xx client errors (except 408/429), caller aborts and rejections from other strategies are skipped. Pass `shouldHandle: ({ outcome }) => !outcome.ok` to retry everything.
+- **Breaker defaults.** tenace opens after 5 consecutive failures and stays open 30 s. Ours, without options: 10% failures over at least 100 calls in 30 s, open 5 s.
+- **Breaker classification.** tenace's `classify` can return `'success'`, `'failure'` or `'ignored'`. Our `shouldHandle` only decides failure; a result it doesn't handle is a success if the call succeeded and ignored if it failed.
+- **Half-open successes.** tenace's `successes` is a count; our `halfOpenSuccessThreshold` is a fraction of the probes (`0.8` with `halfOpenMaxCalls: 5` needs 4).
+- **Open circuit and retries.** Both skip retrying an open circuit. tenace retries it when `retryOn` lists `CircuitOpenError`; ours never does, whatever `shouldHandle` says.
+- **Timeout mode.** tenace's default (aggressive) and ours both reject at the deadline and abort the signal. tenace's `cooperative` keeps a success that arrives late; ours keeps it only with `keepLateResult: true`.
+- **Typed errors are opt-in.** Every pipeline has `settle()`, but `execute()` remains the main path and throws. The error type comes from the builder; `addFallback({ shouldHandle })` with a predicate removes nothing from it (the predicate isn't analysed), so prefer `addFallbackOn(codes, …)`.
+- **Instrumentation.** tenace's events (`retry.scheduled`, `circuit.state_changed`…) map to our telemetry events (`OnRetry`, `OnCircuitOpened`…). See [Events](/reference/events/).
+- **Bundle size.** retry + breaker + timeout is 7.1 KB here against tenace's 10.9 KB, but our full builder is 15.1 KB against tenace's 11.7 KB. Use `PipelineBuilder` with `xStrategy()` factories in browser code (see [Bundle size](/concepts/bundle-size/)).
+
+## What you gain
+
+- Hedging, adaptive concurrency (gradient2, vegas, AIMD), deadline propagation into nested pipelines.
+- A Redis store for breaker state, plus Redis rate limiters, lock and cache; plus a rate-limiter-flexible adapter.
+- `/fetch` and `/axios` clients, NestJS, Express, Hono, Fastify and Koa integrations, Prometheus export.
+- CommonJS as well as ESM, and Node 20.16.
+
+Related: [Typed errors](/concepts/typed-errors/), [Pipelines](/concepts/pipelines/), [Batches](/strategies/batches/).

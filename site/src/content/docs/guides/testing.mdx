@@ -1,0 +1,371 @@
+---
+title: Testing resilience code
+description: Test retries, timeouts, circuit breakers and rate limiters in milliseconds with FakeTimeProvider, deterministic chaos and telemetry assertions.
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+**The problem.** A pipeline with `delay: '2s'` retries and a `breakDuration: '30s'` breaker is slow to test with a real clock.
+Tests either wait (slow), or shrink every duration to a few milliseconds (flaky on a busy CI machine, and no longer the configuration you ship).
+
+**The solution.** Every strategy reads time through a `TimeProvider`. In tests, pass a `FakeTimeProvider` from
+`resilience-pipeline/testing` and move the clock by hand. A test of "three retries 10 s apart, then a 1 s timeout" finishes in
+a few milliseconds and does exactly the same thing every run.
+
+## The fake clock
+
+```ts twoslash
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { ResiliencePipelineBuilder, TimeoutRejectedError } from 'resilience-pipeline';
+import { FakeTimeProvider } from 'resilience-pipeline/testing';
+
+test('gives up after 3 retries and 4 timeouts', async () => {
+  const time = new FakeTimeProvider();
+  const pipeline = new ResiliencePipelineBuilder({ timeProvider: time })
+    .addRetry({ delay: '10s', maxRetryAttempts: 3 })
+    .addTimeout('1s')
+    .build();
+
+  const start = time.now();
+  // 1. Start the call and attach the expectation. Don't await yet.
+  const done = assert.rejects(pipeline.execute(() => new Promise(() => {})), TimeoutRejectedError);
+  // 2. Fire every timer: 4 timeouts of 1 s + 3 delays of 10 s.
+  await time.runAll();
+  // 3. Now the promise has settled.
+  await done;
+  assert.equal(time.now() - start, 34_000);
+});
+```
+
+`FakeTimeProvider` has three controls:
+
+| Member | What it does |
+|---|---|
+| `advance(duration)` | Moves the clock forward by `duration` (`'30s'`, `500`…), firing every timer that comes due, in order. |
+| `runAll(limit = 10_000)` | Fires timers until none are left, including timers scheduled while firing. Throws after `limit` timers. |
+| `pendingTimers` | How many timers are scheduled and not fired yet. `0` at the end of a test means nothing is left running. |
+
+The clock starts at `2026-01-01T00:00:00Z`. Pass `new FakeTimeProvider(0)` or a `Date` to start elsewhere.
+Between two timers, the fake clock yields to the event loop with a real `setTimeout(0)`, so every promise continuation
+(your callback's `await`s, the strategies' own) runs before the next timer fires.
+
+### Attach the assertion before you move the clock
+
+`pipeline.execute()` can't settle until its timers fire. Two ways to get this wrong:
+
+- `await pipeline.execute(...)` first, then `time.runAll()`: the test hangs. The await never returns, because nothing moves the clock.
+- Start the call without a handler, then `await time.runAll()`: the call rejects *during* `runAll()`, while nothing is
+  listening. Node reports an unhandled rejection and fails the test run.
+
+So the order is always: start the call, attach the handler (`assert.rejects(promise)`, `promise.catch(...)`, or just keep the
+promise for a later `await` if it resolves), then move the clock, then await.
+
+### Step through it
+
+`advance()` lets you assert on the state between timers, for example that a retry does not start one millisecond early:
+
+```ts twoslash
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { FakeTimeProvider } from 'resilience-pipeline/testing';
+
+test('retries exactly 10 s apart', async () => {
+  const time = new FakeTimeProvider();
+  const pipeline = new ResiliencePipelineBuilder({ timeProvider: time })
+    .addRetry({ delay: '10s', maxRetryAttempts: 3 })
+    .build();
+
+  let calls = 0;
+  const done = pipeline.execute(async () => {
+    if (++calls < 3) throw new Error('503 from upstream');
+    return 'ok';
+  });
+
+  await time.advance(0);          // let the first attempt run
+  assert.equal(calls, 1);
+  assert.equal(time.pendingTimers, 1); // the retry delay
+
+  await time.advance('9999ms');
+  assert.equal(calls, 1);         // not yet
+  await time.advance(1);
+  assert.equal(calls, 2);         // exactly at 10 s
+
+  await time.advance('10s');
+  assert.equal(await done, 'ok');
+  assert.equal(time.pendingTimers, 0);
+});
+```
+
+## A pipeline you can test: inject the clock
+
+Build pipelines in a function that takes the clock, so production code uses the system clock and tests pass a fake one:
+
+```ts twoslash title="payments-pipeline.ts"
+import { ResiliencePipelineBuilder, type TimeProvider } from 'resilience-pipeline';
+
+export function paymentsPipeline(timeProvider?: TimeProvider) {
+  return new ResiliencePipelineBuilder<Response>({ name: 'payments', timeProvider })
+    .addRetry({ maxRetryAttempts: 3, delay: '200ms', backoffType: 'exponential' })
+    .addCircuitBreaker({ consecutiveFailures: 5, breakDuration: '30s' })
+    .addTimeout('2s')
+    .build();
+}
+```
+
+### When you can't rebuild it: a clock per execution
+
+Sometimes the pipeline is a module-level singleton you can't rebuild in a test. `execute(fn, { timeProvider })` swaps the
+clock for that one call:
+
+```ts twoslash
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { ResiliencePipelineBuilder, TimeoutRejectedError } from 'resilience-pipeline';
+import { FakeTimeProvider } from 'resilience-pipeline/testing';
+// ---cut---
+// Defined once at module level in your app.
+const pipeline = new ResiliencePipelineBuilder()
+  .addRetry({ delay: '5s', maxRetryAttempts: 2 })
+  .addTimeout('1s')
+  .build();
+
+test('times out on a hanging dependency', async () => {
+  const time = new FakeTimeProvider();
+  const done = assert.rejects(pipeline.execute(() => new Promise(() => {}), { timeProvider: time }), TimeoutRejectedError);
+  await time.runAll();
+  await done;
+});
+```
+
+The per-execution clock drives that execution's **own** timing only: retry delays, timeouts, hedging delays and chaos latency.
+Stateful strategies (circuit breakers, rate limiters, caches, locks) keep the pipeline's clock, because their state spans
+many executions. To test a breaker's `breakDuration` or a limiter's refill, give the **builder** the fake clock.
+
+## Circuit breakers, deterministically
+
+Three tools make breaker tests exact: `consecutiveFailures` (opens after N failures in a row, no ratio math),
+`CircuitBreakerStateProvider` (read the state), and `nextTelemetry` (wait for an event).
+
+```ts twoslash
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { BrokenCircuitError, CircuitBreakerStateProvider, ResiliencePipelineBuilder, nextTelemetry } from 'resilience-pipeline';
+import { FakeTimeProvider } from 'resilience-pipeline/testing';
+
+test('opens after 3 failures, probes after 30 s, closes on success', async () => {
+  const time = new FakeTimeProvider();
+  const state = new CircuitBreakerStateProvider();
+  const pipeline = new ResiliencePipelineBuilder({ name: 'payments', timeProvider: time })
+    .addCircuitBreaker({ consecutiveFailures: 3, breakDuration: '30s', stateProvider: state })
+    .build();
+
+  // Subscribe before the action that emits the event.
+  const opened = nextTelemetry((e) => e.event === 'OnCircuitOpened' && e.source.pipelineName === 'payments');
+
+  const failing = () => Promise.reject(new Error('connection reset'));
+  for (let i = 0; i < 3; i++) await assert.rejects(pipeline.execute(failing), /connection reset/);
+  await opened;
+  assert.equal(state.circuitState, 'open');
+
+  // While open, calls are refused without reaching the dependency.
+  const refused = await pipeline.execute(() => 'never runs').catch((e: unknown) => e);
+  assert.ok(refused instanceof BrokenCircuitError);
+  assert.equal(refused.retryAfter, 30_000);
+
+  // After the break, the next call is the half-open probe.
+  await time.advance('30s');
+  assert.equal(await pipeline.execute(() => 'probe'), 'probe');
+  assert.equal(state.circuitState, 'closed');
+});
+```
+
+To start a test from a given state, use the live strategy: `pipeline.getStrategy<CircuitBreakerStrategy<any>>('CircuitBreaker')`
+has `trip()` (open for the break duration) and `reset()` (close and clear the window).
+
+<Aside type="caution" title="Use errors the breaker counts">
+By default retries and breakers ignore client errors: anything with a numeric `status`, `statusCode` or `response.status` in the
+4xx range (except 408 and 429). A test that throws `{ status: 404 }` will never open the circuit. Throw a plain `Error` or a
+5xx-shaped error, or pass your own `shouldHandle`.
+</Aside>
+
+## Rate limiters
+
+Limiters read the builder's clock too, so refills and `queueTimeout` queues are exact:
+
+```ts twoslash
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { RateLimiterRejectedError, ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { FakeTimeProvider } from 'resilience-pipeline/testing';
+
+test('2 tokens, then one per second; waits up to 500 ms', async () => {
+  const time = new FakeTimeProvider();
+  const pipeline = new ResiliencePipelineBuilder({ timeProvider: time })
+    .addRateLimiter({ tokenLimit: 2, replenishmentPeriod: '1s', tokensPerPeriod: 1, queueTimeout: '500ms' })
+    .build();
+
+  await pipeline.execute(() => 1);
+  await pipeline.execute(() => 2);
+
+  // The next token is 1 s away, more than queueTimeout: rejected at once, with a hint.
+  const rejected = await pipeline.execute(() => 3).catch((e: unknown) => e);
+  assert.ok(rejected instanceof RateLimiterRejectedError);
+  assert.equal(rejected.retryAfter, 1000);
+
+  // 600 ms later the token is 400 ms away: within queueTimeout, so the call waits for it.
+  await time.advance('600ms');
+  const waited = pipeline.execute(() => 4);
+  await time.advance('400ms');
+  assert.equal(await waited, 4);
+});
+```
+
+### Things with their own clock
+
+A few objects live outside a pipeline and take their own `timeProvider`. Pass the same fake clock to each:
+
+| Object | Option |
+|---|---|
+| `new RetryBudget({ ... })` | `timeProvider` |
+| `new MemoryLockStore({ ... })` | `timeProvider` (leases expire on it) |
+| `createStats({ ... })` | `timeProvider` (window buckets) |
+| `waitFor(fn, { ... })`, `createBatcher({ ... })` | `timeProvider` |
+| `createResilientFetch({ ... })`, `attachResilience(axios, { ... })` | `timeProvider` |
+
+Jittered delays are random. For exact timings, pass `randomizer: () => 0.5` to `addRetry` (or turn jitter off in the test).
+
+## Chaos in tests: a failing dependency without mocks
+
+Chaos strategies make a pipeline fail on purpose. In a test, set `injectionRate: 1` and the failure is certain. Write the
+production configuration as a function that receives a builder, then append the chaos strategy **last**, so it sits where the
+real dependency call is and every strategy above it reacts to it:
+
+```ts twoslash
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { FakeTimeProvider } from 'resilience-pipeline/testing';
+declare function fetchPrice(sku: string, signal: AbortSignal): Promise<number>;
+// ---cut---
+// Production configuration, shared by the app and the tests.
+export const configurePricing = (b: ResiliencePipelineBuilder<number>) =>
+  b
+    .addFallback({ fallbackValue: -1 })   // "price unavailable"
+    .addRetry({ maxRetryAttempts: 2, delay: '1s' })
+    .addTimeout('500ms');
+
+test('serves the fallback when the pricing service is down', async () => {
+  const time = new FakeTimeProvider();
+  let reachedDependency = 0;
+  const pipeline = configurePricing(new ResiliencePipelineBuilder<number>({ timeProvider: time }))
+    .addChaosFault({ injectionRate: 1, faultGenerator: () => new Error('pricing: 503') }) // innermost
+    .build();
+
+  const price = pipeline.execute(({ signal }) => (reachedDependency++, fetchPrice('sku-1', signal)));
+  await time.runAll();
+  assert.equal(await price, -1);
+  assert.equal(reachedDependency, 0); // every attempt was intercepted
+});
+```
+
+Use `addChaosLatency({ injectionRate: 1, latency: '5s' })` the same way to prove a timeout fires, and
+`addChaosOutcome({ injectionRate: 1, outcome: Outcome.fromResult(new Response(null, { status: 503 })) })` to fake a response.
+For partial failure, keep the rate below 1 and pass a seeded `randomizer` so the test is repeatable.
+
+`setGlobalChaos()` also works in tests, but it is one hook for the whole process: call the function it returns in a
+`finally` / `afterEach`, and don't use it in tests that run concurrently in the same process.
+
+## Asserting telemetry
+
+Telemetry listeners are process-wide, so always filter by `source.pipelineName`, and give each test pipeline its own name.
+
+- `nextTelemetry(filter, signal?)` resolves with the next matching event. Create the promise **before** the action, like an assertion before `runAll()`.
+- `onTelemetry(listener)` receives every event and returns an unsubscribe function. Collect events, act, unsubscribe, assert.
+
+```ts twoslash
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { ResiliencePipelineBuilder, onTelemetry } from 'resilience-pipeline';
+import { FakeTimeProvider } from 'resilience-pipeline/testing';
+
+test('emits one OnRetry per retry', async () => {
+  const time = new FakeTimeProvider();
+  const events: string[] = [];
+  const off = onTelemetry((e) => {
+    if (e.source.pipelineName === 'inventory') events.push(e.event);
+  });
+  try {
+    const pipeline = new ResiliencePipelineBuilder({ name: 'inventory', timeProvider: time })
+      .addRetry({ delay: '1s', maxRetryAttempts: 2 })
+      .build();
+    let n = 0;
+    const done = pipeline.execute(() => {
+      if (++n < 3) throw new Error('timeout talking to inventory');
+      return 'ok';
+    });
+    await time.runAll();
+    await done;
+  } finally {
+    off();
+  }
+  assert.deepEqual(events, [
+    'OnPipelineExecuting',
+    'OnExecutionAttempt', 'OnRetry',
+    'OnExecutionAttempt', 'OnRetry',
+    'OnExecutionAttempt',
+    'OnStrategyExecuted', // one per strategy, outermost last
+    'OnPipelineExecuted',
+  ]);
+});
+```
+
+Event `args` carry the details: `OnRetry` has `attemptNumber`, `retryDelay` and `duration`; `OnCircuitOpened` has
+`breakDuration`; `OnRateLimiterRejected` has `retryAfter`. The full list is in the [events reference](/reference/events/).
+
+## Asserting configuration with `describe()`
+
+Strategy order changes behaviour: a timeout added before a retry is a total budget, after it a per-attempt budget.
+`pipeline.describe()` lists the strategies outermost first, so a test can pin the order:
+
+```ts twoslash
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { ResiliencePipelineBuilder, type TimeProvider } from 'resilience-pipeline';
+function paymentsPipeline(timeProvider?: TimeProvider) {
+  return new ResiliencePipelineBuilder<Response>({ name: 'payments', timeProvider })
+    .addRetry({ maxRetryAttempts: 3, delay: '200ms', backoffType: 'exponential' })
+    .addCircuitBreaker({ consecutiveFailures: 5, breakDuration: '30s' })
+    .addTimeout('2s')
+    .build();
+}
+// ---cut---
+test('payments: retry wraps the breaker and the per-attempt timeout', () => {
+  const steps = paymentsPipeline().describe().map(({ name, kind }) => `${name}:${kind}`);
+  assert.deepEqual(steps, ['Retry:RetryStrategy', 'CircuitBreaker:CircuitBreakerStrategy', 'Timeout:TimeoutStrategy']);
+});
+```
+
+`name` is the strategy's `name` option (or its default, such as `'Retry'`), `kind` is the class name, and `strategy` is the
+live instance.
+
+## Pitfalls
+
+- **Don't combine with Jest or Vitest fake timers.** `FakeTimeProvider` yields to the event loop with the real
+  `setTimeout(0)`. With `vi.useFakeTimers()` or `jest.useFakeTimers()` active, that yield never happens and `runAll()` hangs.
+  You don't need both: the pipeline only uses the clock you give it.
+- **Your own timers are real.** A callback that does `await new Promise((r) => setTimeout(r, 100))` waits 100 real
+  milliseconds; the fake clock doesn't know about it. Simulate slowness with chaos latency or a promise you resolve yourself.
+- **`runAll()` and background loops.** `circuitHealthCheck`, `sharedCircuitState` and `maxRetryAttempts: Infinity` schedule
+  timers forever, so `runAll()` throws after 10 000 timers. Use `advance()` for those.
+- **Zero delays have no timer.** `delay: 0` resolves at once, so `pendingTimers` doesn't count it.
+- **Dispose stateful pipelines** with background work (`pipeline.dispose()`) at the end of the test.
+
+## Related
+
+- [Timeout](/strategies/timeout/), [Retry](/strategies/retry/), [Circuit breaker](/strategies/circuit-breaker/)
+- [Chaos](/strategies/chaos/) and [chaos game days](/guides/chaos-game-days/)
+- [Telemetry model](/concepts/telemetry/)

@@ -1,0 +1,62 @@
+---
+title: Changelog
+description: Release notes for resilience-pipeline. 0.1.0 is the first release.
+sidebar:
+  order: 6
+---
+
+## 0.1.2 (2026-11-14)
+
+- package.json: the author is `ylcnfrht` with a link to the GitHub profile.
+
+## 0.1.1 (2026-11-14)
+
+- README: the comparison section is gone (it linked to a page that no longer exists); the migration guides stay.
+- Docs only otherwise; no code changes.
+
+## 0.1.0 (2026-11-14)
+
+The first release. Everything below ships in it.
+
+### Core
+
+- `ResiliencePipelineBuilder` with Polly v8's API and defaults, plus `PipelineBuilder` + `xStrategy()` factories for tree-shaken bundles.
+- `execute`, `executeOutcome`, `settle` (typed errors), `executeStream` (protects everything up to the first chunk; fallbacks may answer with a value or a stream; hedged attempts never mix streams) and `wrap(fn)`.
+- `ResilienceContext` with `signal`, `operationKey`, typed `properties` (`ResiliencePropertyKey`), `attemptNumber` (0-based) and `idempotent`.
+- One-liners without a pipeline: `retry(fn, options)`, `withTimeout(fn, duration)`, `NonRetryableError`.
+- Deadline propagation: a pipeline executed inside another inherits its signal. `getResilienceSignal()` / `getResilienceContext()` from anywhere in the call.
+- Durations as milliseconds or strings (`'250ms'` … `'2w'`); delays past setTimeout's ~24.8-day limit are chained.
+- Kill switch (`disable()` / `enable()`), `describe()`, `getStrategy()`, `dispose()`.
+- `ResiliencePipelineRegistry` with live `reload()`, `circuitBreakers()` and `limiters()`.
+- Runs on Node.js ≥ 20.16, Bun, Deno, Cloudflare Workers and browsers. ESM, CommonJS and a script-tag build. Zero dependencies.
+
+### Strategies
+
+- **Retry:** constant / linear / exponential backoff, `factor`, jitter (`true`, `'full'`, `'equal'`), `maxDelay`, `delayGenerator`, `Retry-After` honoured, `initialDelay`, `maxRetryTime`, `shouldConsumeRetry`, `onFailedAttempt`, `onRetryExhausted`, shared `RetryBudget`.
+- **Timeout:** aggressive by default, `cooperative` (Polly's behaviour) and `keepLateResult` as options.
+- **Circuit breaker:** time or count window, `consecutiveFailures`, `minimumRps`, `halfOpenMaxCalls`, `halfOpenSuccessThreshold`, `halfOpenMaxWait`, `warmUpDuration`, pluggable `breaker` policy, manual isolation (stacking), `trip()` / `reset()`, snapshots with the rolling window, `circuitHealthCheck()` and `sharedCircuitState()` extensions.
+- **Fallback:** `fallbackAction` / `fallbackValue`, `addFallbackOn(codes)`, `addMapError`, `addStaleFallback`.
+- **Hedging:** latency, parallel and fallback modes, `actionGenerator`, per-attempt property copies.
+- **Concurrency:** bulkhead with FIFO queue, `queueTimeout`, priority and overflow policies; adaptive concurrency (gradient2, vegas, aimd).
+- **Rate limiting:** token bucket, fixed and sliding window, partitioned (per key), bursty limiter, weights, fair waiting, block / penalty / reward, allow / deny lists, insurance limiter, even spacing / `minTime`, snapshot / restore, `getRateLimitInfo()`.
+- **Cache and coalesce:** TTL, stale-if-error, single-flight, pluggable `CacheStore`.
+- **Lock:** leases with renewal and fencing tokens, pluggable `LockStore`.
+- **Chaos:** fault, outcome, latency and behavior injection with Polly's event names, `weighted()` generators, `setGlobalChaos()`.
+- **Batches:** `all`, `allSettled`, `map` (with concurrency), `waitFor`, and `createBatcher()` for request batching.
+
+### Errors
+
+- Every strategy error extends `ExecutionRejectedError` with a stable `code`, a `source` and `toJSON()`.
+- Guards that work across duplicate package copies: `isResilienceError`, `isTimeoutError`, `isBrokenCircuitError`, `isRateLimitError`, `isRejection`.
+- `Outcome.match` / `try` / `all` / `partition` / `unwrap` / `unwrapErr`, `registerResultAdapter()` for other Result types, and the `resilience-pipeline/outcome` subpath.
+- `describeResilienceError()` / `httpStatusFor()` (504 / 429 / 503 / 409 / 403).
+
+### Integrations (subpath exports)
+
+- `/fetch`: `createResilientFetch()` with per-host breakers and per-request overrides. `/axios`: `attachResilience()`.
+- `/http` (Express, Connect, Hono), `/fastify`, `/koa`: request deadlines, load shedding, per-client rate limits with `RateLimit-*` headers.
+- `/nestjs`: `ResilienceModule.forRoot` / `forRootAsync` and method decorators for providers.
+- `/redis`: cache, lock (atomic fencing), rate limiter and shared circuit state, tested on Redis Cluster. `/adapters`: rate-limiter-flexible.
+- `/otel`, `/prometheus`, `createStats()`, `/hystrix`; `onTelemetry()`, `diagnostics_channel`, `instrument()`.
+- `/testing`: `FakeTimeProvider`.
+- The `@resilient` method decorator (standard and legacy decorators).

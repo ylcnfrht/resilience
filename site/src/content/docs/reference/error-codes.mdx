@@ -1,0 +1,85 @@
+---
+title: Error codes & HTTP mapping
+description: Every error class the library raises, with its stable code, when it happens, its HTTP status, the guard that detects it and its extra fields.
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every error a strategy raises extends `ExecutionRejectedError` and carries:
+
+- `code`: a stable, machine-readable string. Branch on it, not on the message.
+- `source`: `{ pipelineName, strategyName }` of the strategy that raised it.
+- `toJSON()`: `{ name, code, message, retryAfter?, source? }`, safe to log or send.
+
+The HTTP status comes from `describeResilienceError()` / `httpStatusFor()` in `resilience-pipeline/http`. The `/http`, `/fastify` and `/koa` middlewares use the same mapping. A resilience error whose code isn't in the table maps to 503.
+
+## Strategy errors
+
+| Class | `code` | Raised when | HTTP | Guard | Extra fields |
+|---|---|---|---|---|---|
+| `TimeoutRejectedError` | `TIMEOUT` | A timeout fired before the callback finished (`addTimeout`, `withTimeout`, `waitFor`). | 504 | `isTimeoutError` | `timeout` (ms) |
+| `BrokenCircuitError` | `CIRCUIT_OPEN` | The circuit is open, or half-open with every probe slot taken. | 503 | `isBrokenCircuitError`, `isRejection` | `retryAfter` (ms until a probe is allowed; `0` when half-open), `cause` (last failure that opened it) |
+| `IsolatedCircuitError` | `CIRCUIT_ISOLATED` | The circuit is held open by `CircuitBreakerManualControl.isolate()`. Extends `BrokenCircuitError`. | 503 | `isBrokenCircuitError`, `isRejection` | `retryAfter` is `undefined` |
+| `RateLimiterRejectedError` | `RATE_LIMITED` | A token bucket, fixed/sliding window or partitioned limiter has no permit within `queueTimeout`, its wait queue is full, or the key is blocked. | 429 | `isRateLimitError`, `isRejection` | `retryAfter` (ms, when known) |
+| `BulkheadRejectedError` | `BULKHEAD_FULL` | A concurrency limiter (fixed or adaptive) is full, a queued call waited past `queueTimeout`, or it was dropped by `overflow`. Extends `RateLimiterRejectedError`. | 503 | `isRateLimitError`, `isRejection` | `reason` (`'full'` \| `'queue-timeout'` \| `'dropped'`), `active`, `queued` |
+| `PermitLimitExceededError` | `PERMIT_LIMIT_EXCEEDED` | A call asked for more permits (`permits(ctx)`) than the limiter can ever grant, so waiting can't help. | 429 | `isRateLimitError`, `isRejection` | `permits`, `permitLimit` |
+| `RateLimiterDeniedError` | `RATE_LIMIT_DENIED` | The call matched the limiter's `deny` predicate. | 403 | `isRateLimitError`, `isRejection` | none |
+| `LockNotAcquiredError` | `LOCK_NOT_ACQUIRED` | `addLock` couldn't get the lease within `wait`. | 409 | `isRejection`, `isResilienceError` | `key` |
+
+Base classes, mostly useful in `instanceof` checks and custom strategies:
+
+| Class | `code` | Notes | HTTP | Guard |
+|---|---|---|---|---|
+| `ExecutionRejectedError` | `EXECUTION_REJECTED` | Base of every strategy error. | 503 (default) | `isResilienceError` |
+| `CallRejectedError` | `REJECTED` | Base of every **rejection**: the call never started, so breakers don't count it and retry doesn't retry it by default. | 503 (default) | `isRejection` |
+
+## Errors that are not strategy errors
+
+| Class | `code` | What it is | HTTP | Guard |
+|---|---|---|---|---|
+| `LockLostError` | `LOCK_LOST` | The lock's lease couldn't be renewed while the callback ran. The callback's signal is aborted with it, and the execution fails with it if the callback then fails. It extends plain `Error`, so `describeResilienceError()` returns `undefined`. Fields: `key`. | none | none (check `code`) |
+| `NonRetryableError` | none | Throw it from your callback to stop retrying at once. The caller receives the **original** error (`cause`), never the wrapper. | none | `isNonRetryableError` |
+| `UnexpectedError` | `UNEXPECTED` | Only from `pipeline.settle()`: wraps anything that isn't a strategy error or an error you returned with `Outcome.fromError()`. Fields: `cause`. | none | `Outcome.match(…, { UNEXPECTED })` |
+
+<Aside type="caution" title="LockLostError has no HTTP status">
+It's the one strategy-related error outside the `ExecutionRejectedError` tree. If you map errors with `httpStatusFor()`, handle `code === 'LOCK_LOST'` yourself (usually 409 or 500).
+</Aside>
+
+## Guards work across package copies
+
+`instanceof` fails when two copies of the package are loaded (ESM and CJS side by side, or nested installs). The guards check a registered symbol and the `code` instead, so they keep working:
+
+```ts twoslash
+declare function chargeCard(): Promise<string>;
+// ---cut---
+import { ResiliencePipelineBuilder, isBrokenCircuitError, isRateLimitError, isTimeoutError } from 'resilience-pipeline';
+import { describeResilienceError } from 'resilience-pipeline/http';
+
+const pipeline = new ResiliencePipelineBuilder<string>({ name: 'payments' }).addCircuitBreaker().addTimeout('2s').build();
+
+try {
+  await pipeline.execute(() => chargeCard());
+} catch (error) {
+  if (isTimeoutError(error)) console.warn(`timed out after ${error.timeout} ms`);
+  else if (isBrokenCircuitError(error)) console.warn(`circuit open, retry in ${error.retryAfter} ms`);
+  else if (isRateLimitError(error)) console.warn(error.code); // RATE_LIMITED, BULKHEAD_FULL, …
+
+  const info = describeResilienceError(error);
+  // { code, httpStatus, retryAfter (seconds), message, source } or undefined for other errors
+}
+```
+
+`describeResilienceError()` converts `retryAfter` to **seconds** (rounded up), ready for a `Retry-After` header, GraphQL `extensions` or a gRPC status. On the error itself, `retryAfter` is in milliseconds.
+
+## Why these statuses
+
+- **504 for a timeout.** The dependency was too slow; it's a gateway problem, not the client's fault (408 would blame the client).
+- **429 for a rate limit.** The client is over its quota and can come back after `Retry-After`.
+- **503 for a full bulkhead.** It's our capacity, not the client's rate. `@nestjs/resilience` makes the same choice.
+- **503 for an open circuit.** A dependency is down; `Retry-After` tells clients when the next probe is allowed.
+- **409 for a held lock.** Someone else is doing the same work right now.
+- **403 for `deny`.** The limiter refused this caller by policy.
+
+Related: [Typed errors](/concepts/typed-errors/), [Failures and defaults](/concepts/failures/), [Express and Hono](/integrations/express-and-hono/).

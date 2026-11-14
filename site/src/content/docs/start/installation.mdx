@@ -1,0 +1,120 @@
+---
+title: Installation
+description: Install resilience-pipeline with npm, pnpm, yarn or bun, pick an entry point, or load it from a CDN with a script tag.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Tabs syncKey="pm">
+  <TabItem label="npm">
+    ```sh
+    npm i resilience-pipeline
+    ```
+  </TabItem>
+  <TabItem label="pnpm">
+    ```sh
+    pnpm add resilience-pipeline
+    ```
+  </TabItem>
+  <TabItem label="yarn">
+    ```sh
+    yarn add resilience-pipeline
+    ```
+  </TabItem>
+  <TabItem label="bun">
+    ```sh
+    bun add resilience-pipeline
+    ```
+  </TabItem>
+</Tabs>
+
+No runtime dependencies. TypeScript types are included.
+
+## Runtimes
+
+| Runtime | Support |
+|---|---|
+| Node.js | ≥ 20.16 (`engines` field) |
+| Bun, Deno | Supported |
+| Cloudflare Workers | Supported. Enable `nodejs_compat` for [deadline propagation](/concepts/context-and-signals/) |
+| Browsers | Supported, with two features degraded (see [Runtimes](/concepts/runtimes/)) |
+
+## ESM and CommonJS
+
+Both builds ship with their own type declarations, resolved through `exports`:
+
+<Tabs syncKey="module">
+  <TabItem label="ESM">
+    ```ts
+    import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+    ```
+  </TabItem>
+  <TabItem label="CommonJS">
+    ```js
+    const { ResiliencePipelineBuilder } = require('resilience-pipeline');
+    ```
+  </TabItem>
+</Tabs>
+
+The package is marked `"sideEffects": false`, so bundlers drop every strategy you don't import. See
+[Bundle size](/concepts/bundle-size/).
+
+## Entry points
+
+Integrations live in subpaths, so the main entry never pulls in framework code.
+
+| Import | Contents |
+|---|---|
+| `resilience-pipeline` | Builders, every strategy, outcomes, errors, registry, telemetry, batches, `createStats` |
+| `resilience-pipeline/outcome` | `Outcome` helpers and error classes only, for code that just handles results |
+| `resilience-pipeline/testing` | `FakeTimeProvider` |
+| `resilience-pipeline/fetch` | [`createResilientFetch()`](/integrations/fetch/) |
+| `resilience-pipeline/axios` | [`attachResilience()`](/integrations/axios/) |
+| `resilience-pipeline/http` | [Express/Connect and Hono middleware](/integrations/express-and-hono/), `describeResilienceError()` |
+| `resilience-pipeline/fastify` | [Fastify plugin](/integrations/fastify/) |
+| `resilience-pipeline/koa` | [Koa middleware](/integrations/koa/) |
+| `resilience-pipeline/nestjs` | [NestJS module and decorators](/integrations/nestjs/) |
+| `resilience-pipeline/redis` | [Redis stores and limiters](/integrations/redis/) |
+| `resilience-pipeline/adapters` | [rate-limiter-flexible](/integrations/adapters/) |
+| `resilience-pipeline/otel` | [OpenTelemetry](/integrations/opentelemetry/) |
+| `resilience-pipeline/prometheus` | [Prometheus](/integrations/prometheus/) |
+| `resilience-pipeline/hystrix` | [Hystrix dashboard stream](/integrations/hystrix/) |
+
+## Optional peer dependencies
+
+Install these only for the subpath that needs them. They are marked optional, so package managers don't
+install or warn about them otherwise.
+
+| Peer | Version | Used by |
+|---|---|---|
+| `@nestjs/common`, `@nestjs/core` | ≥ 10 | `/nestjs` |
+| `@opentelemetry/api` | ^1.4.0 | `/otel` |
+| `prom-client` | ≥ 14 | `/prometheus` |
+| `axios` | ≥ 1.0.0 | `/axios` |
+| `fastify` | ≥ 4 | `/fastify` |
+| `koa` | ≥ 2 | `/koa` |
+
+`/redis` and `/adapters` don't declare peers: you pass in a client or store you already created (ioredis,
+node-redis, rate-limiter-flexible).
+
+## CDN (script tag)
+
+A minified IIFE build of the main entry is published at `dist/browser/resilience-pipeline.min.js`. It exposes
+`window.resiliencePipeline`:
+
+```html
+<script src="https://unpkg.com/resilience-pipeline"></script>
+<script>
+  const { retry } = window.resiliencePipeline;
+  retry(() => fetch('/api/health'), { maxRetryAttempts: 3, delay: 500 }).then(console.log);
+</script>
+```
+
+`https://cdn.jsdelivr.net/npm/resilience-pipeline` serves the same file.
+
+<Aside type="caution">
+The script-tag build contains only the main entry. Subpaths such as `/fetch` or `/testing` need a bundler or an
+ESM CDN.
+</Aside>

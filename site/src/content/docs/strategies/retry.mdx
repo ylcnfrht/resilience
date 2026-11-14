@@ -1,0 +1,292 @@
+---
+title: Retry
+description: Retry transient failures with constant, linear or exponential backoff, jitter, Retry-After support and a shared retry budget.
+sidebar:
+  order: 1
+---
+import BackoffChart from '../../../components/BackoffChart.tsx';
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+Retry runs the call again when it fails with a **transient** error: a dropped connection, a 503, a timeout. It waits between attempts (backoff) so the dependency gets time to recover.
+
+Don't retry what can't succeed the second time: validation errors, 4xx responses, an open circuit. The default predicate already skips those. Don't retry calls that must not run twice (payments) unless the dependency is idempotent; mark them with [`idempotent: false`](#calls-that-must-not-run-twice).
+
+## Example
+
+<Tabs syncKey="builder">
+<TabItem label="ResiliencePipelineBuilder">
+
+```ts twoslash
+declare function fetchUser(id: string, signal: AbortSignal): Promise<{ id: string }>;
+// ---cut---
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addRetry({
+    maxRetryAttempts: 3,          // 4 calls at most
+    backoffType: 'exponential',   // 200 ms, 400 ms, 800 ms
+    delay: '200ms',
+    useJitter: 'full',
+  })
+  .build();
+
+const user = await pipeline.execute(({ signal }) => fetchUser('42', signal));
+```
+
+</TabItem>
+<TabItem label="PipelineBuilder (smallest bundle)">
+
+```ts twoslash
+declare function fetchUser(id: string, signal: AbortSignal): Promise<{ id: string }>;
+// ---cut---
+import { PipelineBuilder, retryStrategy } from 'resilience-pipeline';
+
+const pipeline = new PipelineBuilder()
+  .add(retryStrategy({ maxRetryAttempts: 3, backoffType: 'exponential', delay: '200ms', useJitter: 'full' }))
+  .build();
+
+const user = await pipeline.execute(({ signal }) => fetchUser('42', signal));
+```
+
+</TabItem>
+<TabItem label="retry() one-off">
+
+```ts twoslash
+declare function fetchUser(id: string, signal: AbortSignal): Promise<{ id: string }>;
+// ---cut---
+import { retry } from 'resilience-pipeline';
+
+const user = await retry(({ signal }) => fetchUser('42', signal), {
+  maxRetryAttempts: 3,
+  backoffType: 'exponential',
+  delay: '200ms',
+});
+```
+
+`retry(fn, options)` builds a one-strategy pipeline and calls it. It also accepts `signal` and `timeProvider` next to the retry options. It is the smallest entry point (about 4.1 KB min+gzip).
+
+</TabItem>
+</Tabs>
+
+## How it works
+
+1. The callback runs. `context.attemptNumber` is `0` for the original call, then `1`, `2`, … for retries (one counter per execution, shared with hedging, so numbers never repeat). With `executeStream`, a successful stream that `shouldHandle` retries is closed first.
+2. Retry stops at once and returns the outcome if any of these hold:
+   - the outcome is not handled by `shouldHandle` (by default: successes, 4xx except 408/429, aborts, rejections from other strategies);
+   - the error is a `BrokenCircuitError` (open or isolated circuit), whatever `shouldHandle` says;
+   - the error is a `NonRetryableError`;
+   - the execution's signal is aborted;
+   - the call is marked `idempotent: false` and the failure was not a rejection.
+3. `onFailedAttempt` runs. If no retries are left, `onRetryExhausted` runs and the last outcome is returned.
+4. The delay is computed: `delayGenerator`, else the backoff formula, then raised to the error's `retryAfter` if that is longer.
+5. If waiting would pass `maxRetryTime`, retry gives up (`onRetryExhausted`). If a `budget` refuses the retry, it gives up too (`onBudgetExhausted`).
+6. `onRetry` runs, the delay elapses (an abort cancels the wait), and the next attempt starts.
+
+When all retries fail, the caller gets the **last** attempt's error, not a wrapper.
+
+## Backoff
+
+The base delay for the retry after attempt `n` (0 = the original call) is:
+
+| `backoffType` | Delay | `delay: 200` → retries 1, 2, 3, 4 |
+|---|---|---|
+| `'constant'` (default) | `delay` | 200, 200, 200, 200 |
+| `'linear'` | `delay × (n + 1)` | 200, 400, 600, 800 |
+| `'exponential'` | `delay × factor^n` | 200, 400, 800, 1600 (`factor: 2`) |
+
+`maxDelay` caps that value before jitter is applied, so `'full'` and `'equal'` spread over the capped value.
+
+<BackoffChart client:visible />
+
+### Jitter
+
+When many clients fail at the same moment, identical delays make them all retry at the same moment too. Jitter spreads them out. `d` is the base delay after the `maxDelay` cap, `r` a random number in `[0, 1)`:
+
+| `useJitter` | Delay | Use it when |
+|---|---|---|
+| `false` (default) | `d` | One caller, or tests. |
+| `'full'` | `r × d` (0 to `d`) | Many callers hit one dependency. Spreads load best. |
+| `'equal'` | `d/2 + r × d/2` (`d/2` to `d`) | You want spread but also a minimum wait. |
+| `true`, constant / linear | `d ± 25%`, capped at `maxDelay` | Polly compatibility. |
+| `true`, exponential | Polly's decorrelated jitter V2, capped at `maxDelay` | Polly compatibility. Grows roughly ×2 per attempt; `factor` is ignored. |
+
+Pass `randomizer: () => number` to make jitter deterministic in tests.
+
+### Custom delays
+
+`delayGenerator` overrides the formula per attempt. Return `undefined` or a negative number to fall back to the computed delay. Generated delays are **not** capped by `maxDelay`.
+
+The `backoff` helpers are plain functions of the attempt number. Use them as a `delayGenerator`, in `waitFor({ interval })`, or in your own loops:
+
+```ts twoslash
+import { ResiliencePipelineBuilder, backoff } from 'resilience-pipeline';
+
+// Exponential with a custom factor, cap and full jitter.
+const exp = backoff.exponential({ delay: '100ms', factor: 3, maxDelay: '10s', useJitter: 'full' });
+
+// A fixed schedule; the last delay repeats: 100 ms, 1 s, 5 s, 5 s, …
+const steps = backoff.sequence(['100ms', '1s', '5s']);
+
+exp(0);  // 0..100
+steps(4); // 5000
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addRetry({ maxRetryAttempts: 5, delayGenerator: steps })
+  .build();
+```
+
+| Helper | Options |
+|---|---|
+| `backoff.constant(o)` | `delay` (required), `maxDelay`, `useJitter: 'full' \| 'equal' \| false`, `randomizer` |
+| `backoff.linear(o)` | same as `constant` |
+| `backoff.exponential(o)` | same, plus `factor` (default 2) |
+| `backoff.sequence(delays)` | a non-empty list of durations; the last one repeats |
+
+Each returned function accepts a number or anything with an `attemptNumber` (such as the retry predicate args).
+
+### Retry-After
+
+Errors can carry a `retryAfter` in milliseconds. `RateLimiterRejectedError` does. With `respectRetryAfter: true` (the default), retry waits **at least** that long, still capped by `maxDelay`. For HTTP responses, read the header in a `delayGenerator`:
+
+```ts twoslash
+import { ResiliencePipelineBuilder, PredicateBuilder } from 'resilience-pipeline';
+import { retryAfterMs } from 'resilience-pipeline/fetch';
+
+const pipeline = new ResiliencePipelineBuilder<Response>()
+  .addRetry({
+    maxRetryAttempts: 4,
+    backoffType: 'exponential',
+    delay: '500ms',
+    shouldHandle: new PredicateBuilder<Response>()
+      .handle(TypeError)
+      .handleResult((r) => r.status === 429 || r.status === 503),
+    // Honour Retry-After on 429/503 responses; undefined falls back to the backoff.
+    delayGenerator: ({ outcome }) => (outcome.ok ? retryAfterMs(outcome.result) : undefined),
+  })
+  .build();
+```
+
+[`createResilientFetch()`](/integrations/fetch/) does this for you.
+
+## Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `name` | `string` | `'Retry'` | Strategy name in telemetry and `getStrategy()`. |
+| `shouldHandle` | `(args) => boolean \| Promise<boolean>` or `PredicateBuilder` | transient errors | Which outcomes are retried. Default: errors except 4xx (408/429 are retried), aborts and rejections. Results are never retried by default. |
+| `maxRetryAttempts` | `number` | `3` | Retries after the original call. `0` disables retrying; `Infinity` retries until aborted. |
+| `delay` | `Duration` | `2000` | Base delay. |
+| `backoffType` | `'constant' \| 'linear' \| 'exponential'` | `'constant'` | How the delay grows. |
+| `factor` | `number` | `2` | Growth per retry for `'exponential'`. Must be ≥ 1. |
+| `useJitter` | `boolean \| 'full' \| 'equal'` | `false` | See [Jitter](#jitter). |
+| `maxDelay` | `Duration` | none | Cap for computed delays and for `retryAfter`. Does not cap `delayGenerator` results. |
+| `delayGenerator` | `(args) => Duration \| undefined` (or a promise) | none | Per-attempt delay. `undefined` or negative uses the computed delay. |
+| `respectRetryAfter` | `boolean` | `true` | Wait at least the error's numeric `retryAfter` (ms). |
+| `initialDelay` | `Duration` | `0` | Wait before the **first** attempt too, for example to let a just-started dependency come up. |
+| `maxRetryTime` | `Duration` | none | Stop scheduling retries once the next one would start more than this long after the first attempt. The attempt in flight is not cancelled. |
+| `shouldConsumeRetry` | `(args) => boolean` (or a promise) | always `true` | Return `false` for failures that should be retried without using up a retry (a token refresh). |
+| `onRetry` | `(args: OnRetryArgs) => void` | none | Before each retry's delay. Gets `retryDelay` and the failed attempt's `duration`. |
+| `onFailedAttempt` | `(args: OnFailedAttemptArgs) => void` | none | After every handled failure, the last one included. Gets `retriesLeft` and `duration`. |
+| `onRetryExhausted` | `(args) => void` | none | When retries or `maxRetryTime` run out and the last outcome is still a failure. |
+| `randomizer` | `() => number` | `Math.random` | Random source in `[0, 1)` for jitter. |
+| `budget` | `RetryBudget` | none | Shared retry budget, see [below](#retry-budget). |
+| `onBudgetExhausted` | `(args) => void` | none | The budget refused a retry. The last outcome is returned. |
+
+`Duration` is milliseconds or a string: `'250ms'`, `'30s'`, `'5m'`, `'1h'`, `'1d'`, `'2w'`. All callbacks may be async; retry awaits them. Every callback gets `outcome`, `context` and `attemptNumber` (of the attempt that failed).
+
+Invalid values throw a `RangeError` when the pipeline is built: negative `maxRetryAttempts`, `delay`, `maxDelay` or `initialDelay`, `factor < 1`, `maxRetryTime <= 0`.
+
+## Stopping early
+
+### NonRetryableError
+
+Throw `NonRetryableError` from the callback when you know retrying is pointless. Retry stops, and the caller receives the **original** error, not the wrapper:
+
+```ts twoslash
+declare function charge(amount: number, signal: AbortSignal): Promise<Response>;
+// ---cut---
+import { retry, NonRetryableError } from 'resilience-pipeline';
+
+const res = await retry(async ({ signal }) => {
+  const res = await charge(100, signal);
+  if (res.status === 402) throw new NonRetryableError(new Error('card declined'));
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res;
+}, { maxRetryAttempts: 3 });
+```
+
+It accepts an error or a message: `new NonRetryableError('invalid card')`.
+
+### Open circuits are never retried
+
+A `BrokenCircuitError` (`CIRCUIT_OPEN` or `CIRCUIT_ISOLATED`) always stops retry, even if your `shouldHandle` would match it. The circuit is open to protect a failing dependency; retrying only adds load. Put the breaker **inside** the retry (add retry first) so each attempt goes through it.
+
+### Calls that must not run twice
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+const pipeline = new ResiliencePipelineBuilder().addRetry().build();
+declare function pay(signal: AbortSignal): Promise<void>;
+// ---cut---
+await pipeline.execute(({ signal }) => pay(signal), { idempotent: false });
+```
+
+With `idempotent: false`, retry only repeats a call that **never started**: one that failed with a rejection (an open circuit or full limiter further in). A call that may have reached the dependency is never repeated. The default `shouldHandle` does not handle rejections, so in practice such a call is not retried at all unless your predicate handles, say, `isRateLimitError`.
+
+## Retry budget
+
+Each caller retrying 3 times means up to 4× the load, exactly when the dependency is weakest. A `RetryBudget` caps retries relative to traffic. Share one instance across every pipeline that calls the same dependency.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, RetryBudget } from 'resilience-pipeline';
+
+const inventoryBudget = new RetryBudget({ ratio: 0.2, minRetriesPerSecond: 10 }); // at most +20% load
+
+const reads = new ResiliencePipelineBuilder().addRetry({ budget: inventoryBudget }).build();
+const writes = new ResiliencePipelineBuilder().addRetry({ budget: inventoryBudget, maxRetryAttempts: 1 }).build();
+
+inventoryBudget.stats(); // { requests, retries } in the current window
+```
+
+A retry is allowed while `retries < minRetriesPerSecond × window_in_seconds + ratio × requests`, counted over the window. With the defaults that is 100 + 20% of requests per 10 s. Each execution counts as one request (after `initialDelay`), each retry as one retry.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `ratio` | `number` | `0.2` | Retries allowed as a fraction of requests in the window. |
+| `minRetriesPerSecond` | `number` | `10` | Retries always allowed per second, so low-traffic callers can still retry. |
+| `window` | `Duration` | `'10s'` | How long counts are kept (10 buckets). |
+| `timeProvider` | `TimeProvider` | system clock | Clock, for tests. |
+
+When the budget refuses, retry returns the last outcome, reports `OnRetryBudgetExhausted` and calls `onBudgetExhausted`. `onRetryExhausted` is not called.
+
+## Events and errors
+
+| Telemetry event | Callback | When |
+|---|---|---|
+| `OnRetry` | `onRetry` | Before each retry's delay. |
+| `OnRetryExhausted` | `onRetryExhausted` | Retries or `maxRetryTime` ran out. |
+| `OnRetryBudgetExhausted` | `onBudgetExhausted` | The budget refused a retry. |
+| `OnExecutionAttempt` | none | Every attempt, emitted by the pipeline (also without retry). Args include `attemptNumber` and `duration`. |
+
+`onFailedAttempt` has no telemetry event. See the [events catalog](/reference/events/).
+
+Retry raises no error of its own. The caller gets the last attempt's outcome. If an abort cancels a wait, the abort reason is returned.
+
+## Common mistakes
+
+<Aside type="caution" title="Retrying results without a predicate">
+The default `shouldHandle` only looks at errors. `fetch` resolves with a 503 `Response`, it doesn't throw. Use `PredicateBuilder.handleResult((r) => r.status >= 500)`, or throw on bad statuses.
+</Aside>
+
+- **Strategy order.** `addRetry().addTimeout('2s')` gives each attempt 2 s. `addTimeout('2s').addRetry()` gives all attempts together 2 s. See [Timeout](/strategies/timeout/#per-attempt-or-total).
+- **`shouldConsumeRetry` with no limit.** A failure that never consumes a retry is retried forever. Combine it with `maxRetryTime` or make sure the condition clears (the token refresh succeeds).
+- **Long waits in tests.** Use [`FakeTimeProvider`](/guides/testing/) instead of real delays.
+
+## Related
+
+- [Timeout](/strategies/timeout/), usually added after retry for a per-attempt limit
+- [Circuit breaker](/strategies/circuit-breaker/)
+- [What counts as a failure](/concepts/failures/)
+- [Calling rate-limited APIs](/guides/rate-limited-apis/)
+- [Migrating from p-retry](/migration/p-retry/)

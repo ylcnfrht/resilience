@@ -1,0 +1,92 @@
+---
+// Starlight's header + a top-level section nav (the default header has none).
+import config from 'virtual:starlight/user-config';
+import LanguageSelect from 'virtual:starlight/components/LanguageSelect';
+import Search from 'virtual:starlight/components/Search';
+import SiteTitle from 'virtual:starlight/components/SiteTitle';
+import SocialIcons from 'virtual:starlight/components/SocialIcons';
+import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
+
+const shouldRenderSearch = config.pagefind || config.components.Search !== '@astrojs/starlight/components/Search.astro';
+const path = Astro.url.pathname;
+const links = [
+  { label: 'Docs', href: '/start/introduction/', match: ['/start/', '/concepts/'] },
+  { label: 'Strategies', href: '/strategies/retry/', match: ['/strategies/'] },
+  { label: 'Integrations', href: '/integrations/fetch/', match: ['/integrations/'] },
+  { label: 'Guides', href: '/guides/testing/', match: ['/guides/', '/migration/'] },
+  { label: 'Reference', href: '/reference/options/', match: ['/reference/', '/api/'] },
+  { label: 'Playground', href: '/playground/', match: ['/playground/'] },
+];
+---
+
+<div class="header">
+  <div class="title-wrapper sl-flex"><SiteTitle /></div>
+  <nav class="rp-topnav sl-hidden lg:sl-flex" aria-label="Sections">
+    {links.map((l) => <a href={l.href} aria-current={l.match.some((m) => path.startsWith(m)) ? 'true' : undefined}>{l.label}</a>)}
+  </nav>
+  <div class="sl-flex print:hidden rp-search">{shouldRenderSearch && <Search />}</div>
+  <div class="sl-hidden md:sl-flex print:hidden right-group">
+    <div class="sl-flex social-icons"><SocialIcons /></div>
+    <ThemeSelect />
+    <LanguageSelect />
+  </div>
+</div>
+
+<style>
+  .header {
+    display: flex;
+    gap: var(--sl-nav-gap);
+    justify-content: space-between;
+    align-items: center;
+    height: 100%;
+  }
+  .title-wrapper {
+    overflow: clip;
+    padding: 0.25rem;
+    margin: -0.25rem;
+    min-width: 0;
+  }
+  .right-group,
+  .social-icons {
+    gap: 1rem;
+    align-items: center;
+  }
+  .rp-topnav {
+    gap: 0.25rem;
+    align-items: center;
+  }
+  .rp-topnav a {
+    color: var(--sl-color-gray-3);
+    text-decoration: none;
+    font-size: 0.875rem;
+    padding: 0.35rem 0.65rem;
+    border-radius: 8px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .rp-topnav a:hover {
+    color: var(--sl-color-white);
+  }
+  .rp-topnav a[aria-current='true'] {
+    color: var(--sl-color-white);
+    background: var(--rp-surface-2);
+  }
+  .rp-search {
+    justify-content: flex-end;
+  }
+  @media (min-width: 50rem) {
+    .rp-search {
+      flex: 1;
+      justify-content: center;
+    }
+  }
+  @media (min-width: 72rem) {
+    .header {
+      display: grid;
+      grid-template-columns: auto auto 1fr auto;
+      gap: 1.5rem;
+    }
+    .rp-search {
+      justify-content: flex-end;
+    }
+  }
+</style>

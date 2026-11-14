@@ -1,0 +1,174 @@
+---
+title: Chaos
+description: Inject faults, fake results, latency or side effects into a pipeline (Polly's Simmy) to prove your retries, timeouts and fallbacks work.
+sidebar:
+  order: 11
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+Chaos strategies make a healthy dependency look broken, on purpose and at a controlled rate. Use them to check that the rest of the pipeline does its job: that the retry really retries, the timeout fires, the breaker opens and the fallback answers. Run them in tests, staging, and carefully in production. They are a port of Polly's Simmy, with the same option and event names. Don't use them as a test double for business logic; a mock is simpler.
+
+<Tabs syncKey="builder">
+<TabItem label="ResiliencePipelineBuilder">
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addRetry({ maxRetryAttempts: 3 })
+  .addTimeout('1s')
+  .addChaosLatency({ injectionRate: 0.1, latency: '2s' }) // 10%: slower than the timeout
+  .addChaosFault({ injectionRate: 0.05, fault: new Error('chaos: connection reset') })
+  .build();
+```
+</TabItem>
+<TabItem label="PipelineBuilder">
+```ts twoslash
+import { PipelineBuilder, chaosFaultStrategy, chaosLatencyStrategy, retryStrategy, timeoutStrategy } from 'resilience-pipeline';
+
+const pipeline = new PipelineBuilder()
+  .add(retryStrategy({ maxRetryAttempts: 3 }))
+  .add(timeoutStrategy('1s'))
+  .add(chaosLatencyStrategy({ injectionRate: 0.1, latency: '2s' }))
+  .add(chaosFaultStrategy({ injectionRate: 0.05, fault: new Error('chaos: connection reset') }))
+  .build();
+```
+</TabItem>
+</Tabs>
+
+Add chaos strategies **last** (innermost), right before the callback, so every strategy you want to test sees the injected failure as if it came from the dependency.
+
+## The four strategies
+
+| Builder method | Definition | Injects | Then |
+|---|---|---|---|
+| `addChaosFault` | `chaosFaultStrategy` | An error (`fault` / `faultGenerator`) | Fails; the callback doesn't run. |
+| `addChaosOutcome` | `chaosOutcomeStrategy` | A result or error (`outcome` / `outcomeGenerator`) | Returns it; the callback doesn't run. |
+| `addChaosLatency` | `chaosLatencyStrategy` | A delay (`latency` / `latencyGenerator`) | Runs the callback after the delay. |
+| `addChaosBehavior` | `chaosBehaviorStrategy` | Any side effect (`behavior`) | Runs the callback after it. |
+
+Each execution: if enabled, draw `randomizer()`; inject when it's below the injection rate. A generator that returns `undefined` (fault or outcome) skips injection for that call. An abort during injected latency fails the execution with the abort reason.
+
+```ts twoslash
+import { Outcome, ResiliencePipelineBuilder, TimeoutRejectedError, weighted } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder<Response>()
+  // A fake 503 answer, as if the API were overloaded.
+  .addChaosOutcome({ injectionRate: 0.02, outcome: Outcome.fromResult(new Response(null, { status: 503 })) })
+  // 80% timeouts, 20% resets, picked per injection.
+  .addChaosFault({
+    injectionRate: 0.05,
+    faultGenerator: weighted([
+      { weight: 80, value: () => new TimeoutRejectedError(1000) },
+      { weight: 20, value: () => new Error('ECONNRESET') },
+    ]),
+  })
+  // Random latency between 0 and 3 s.
+  .addChaosLatency({ injectionRate: 0.1, latencyGenerator: () => Math.random() * 3000 })
+  .build();
+```
+
+`weighted(entries, randomizer?)` returns a function that picks one entry by weight (Polly's `FaultGenerator` / `OutcomeGenerator`). Values may be constants or factories called per pick. Weights must be ≥ 0 and sum to more than 0.
+
+## Options
+
+### Common to all four
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `injectionRate` | `number` | `0.001` | Probability per execution, in [0, 1]. Ignored when `injectionRateGenerator` is set. |
+| `injectionRateGenerator` | `(args: { context }) => number \| Promise<number>` | – | Rate per execution, e.g. from a feature flag or a header. |
+| `enabled` | `boolean` | `true` | Master switch. Ignored when `enabledGenerator` is set. |
+| `enabledGenerator` | `(args: { context }) => boolean \| Promise<boolean>` | – | Switch per execution. Checked before the rate. |
+| `randomizer` | `() => number` | `Math.random` | Source of randomness in [0, 1). Seed it for reproducible tests. |
+| `name` | `string` | `'Chaos.Fault'`, `'Chaos.Outcome'`, `'Chaos.Latency'` or `'Chaos.Behavior'` | Strategy name. |
+
+### Per strategy
+
+| Strategy | Option | Type | Default | Description |
+|---|---|---|---|---|
+| Fault | `fault` | `unknown` | – | The error to fail with, used as is (the same instance every time; a function is not called). `fault` or `faultGenerator` is required. |
+| Fault | `faultGenerator` | `(args: { context }) => unknown` | – | Error per injection; `undefined` skips. Wins over `fault`. |
+| Fault | `onFaultInjected` | `(args: { context, fault }) => void \| Promise<void>` | – | After a fault is chosen. |
+| Outcome | `outcome` | `Outcome<T>` | – | `Outcome.fromResult(value)` or `Outcome.fromError(error)`. `outcome` or `outcomeGenerator` is required. |
+| Outcome | `outcomeGenerator` | `(args: { context }) => Outcome<T> \| undefined` | – | Outcome per injection; `undefined` skips. Wins over `outcome`. |
+| Outcome | `onOutcomeInjected` | `(args: { context, outcome }) => void \| Promise<void>` | – | After an outcome is chosen. |
+| Latency | `latency` | `Duration` | `30_000` (30 s) | Delay before the callback. |
+| Latency | `latencyGenerator` | `(args: { context }) => Duration` | – | Delay per injection. Wins over `latency`. |
+| Latency | `onLatencyInjected` | `(args: { context, latency }) => void \| Promise<void>` | – | Before the delay; `latency` in ms. |
+| Behavior | `behavior` | `(args: { context }) => void \| Promise<void>` | required | The side effect, e.g. kill a connection or fill a disk in a test. |
+| Behavior | `onBehaviorInjected` | `(args: { context }) => void \| Promise<void>` | – | Before `behavior` runs. |
+
+Generators may return promises.
+
+## Events
+
+Event names match Polly, so dashboards built for Polly's telemetry keep working.
+
+| Telemetry event | Callback | Args |
+|---|---|---|
+| `Chaos.OnFault` | `onFaultInjected` | `{ context, fault }` |
+| `Chaos.OnOutcome` | `onOutcomeInjected` | `{ context, outcome }` |
+| `Chaos.OnLatency` | `onLatencyInjected` | `{ context, latency }` |
+| `Chaos.OnBehavior` | `onBehaviorInjected` | `{ context }` |
+| `Chaos.OnGlobal` | – | `{ context, latency, fault }` (`setGlobalChaos`; `fault` is a boolean) |
+
+The strategies raise no errors of their own: they raise whatever you inject.
+
+## Chaos for the whole app
+
+`setGlobalChaos(options)` injects faults or latency into **every** pipeline in the process, without touching their configuration. It runs before each callback attempt, so retries and hedges are hit too. Use it for game days and soak tests: "does the whole app survive a slow database?". It returns a function that turns it off.
+
+```ts twoslash
+import { setGlobalChaos } from 'resilience-pipeline';
+
+const stop = setGlobalChaos({
+  injectionRate: 0.1,
+  latency: '2s',
+  filter: (ctx) => ctx.operationKey === 'db',
+});
+// ... every matching call is now 2 s slower 10% of the time
+stop();
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `injectionRate` | `number` | `0.05` | Probability per callback attempt, in [0, 1]. |
+| `filter` | `(context) => boolean` | every call | Inject only where it returns true (one `operationKey`, `name` or property; the context carries no pipeline name). |
+| `latency` | `Duration` | – | Delay before the callback. |
+| `fault` | `unknown \| (context) => unknown` | – | Error to fail with (or a function creating it), after the latency. Omit to inject latency only. `fault` or `latency` is required. |
+| `randomizer` | `() => number` | `Math.random` | Source of randomness. |
+
+Only one global chaos configuration is active at a time: a second call replaces the first, and the first one's `stop()` then does nothing.
+
+## Using chaos safely in production
+
+<Aside type="danger" title="Gate it">
+Never ship a chaos strategy that is on by default with a meaningful rate. Gate it with `enabledGenerator` (a feature flag you can turn off without a deploy), scope it with `injectionRateGenerator` or `setGlobalChaos`'s `filter`, and start small.
+</Aside>
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+declare const flags: { isOn(name: string): boolean; number(name: string): number };
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder()
+  .addRetry()
+  .addChaosFault({
+    enabledGenerator: () => flags.isOn('chaos.payments'),
+    // Only synthetic traffic, never real customers.
+    injectionRateGenerator: ({ context }) => (context.properties.get('synthetic') ? flags.number('chaos.payments.rate') : 0),
+    faultGenerator: () => new Error('chaos: payments down'),
+  })
+  .build();
+```
+
+- Inject only into calls that are safe to fail: synthetic traffic, read paths, internal tenants.
+- Watch the `Chaos.*` events next to your error rates, so an injected failure is never mistaken for a real one.
+- Seed `randomizer` in tests: `injectionRate: 1` or a fixed sequence makes runs reproducible.
+
+## Related
+
+- [Chaos game days guide](/guides/chaos-game-days/)
+- [Testing guide](/guides/testing/): `FakeTimeProvider` makes injected latency instant.
+- [Telemetry](/concepts/telemetry/)
+- [Migrating from Polly](/migration/polly/)

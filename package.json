@@ -1,0 +1,308 @@
+{
+  "name": "resilience-pipeline",
+  "version": "0.1.2",
+  "description": "Resilience pipelines for TypeScript: retry, circuit breaker, timeout, hedging, rate limiting and typed errors. A Polly v8 API for Node, Bun, Deno, Workers and browsers. Zero dependencies.",
+  "keywords": [
+    "resilience",
+    "retry",
+    "backoff",
+    "circuit-breaker",
+    "timeout",
+    "hedging",
+    "fallback",
+    "bulkhead",
+    "rate-limiter",
+    "rate-limiting",
+    "fault-tolerance",
+    "polly",
+    "chaos",
+    "abortsignal",
+    "typescript",
+    "fetch",
+    "axios",
+    "express",
+    "fastify",
+    "hono",
+    "koa",
+    "nestjs",
+    "redis",
+    "opentelemetry"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ylcnfrht/resilience-pipeline.git"
+  },
+  "homepage": "https://resilience-pipeline.ferhatyalcin.dev",
+  "bugs": {
+    "url": "https://github.com/ylcnfrht/resilience-pipeline/issues"
+  },
+  "author": {
+    "name": "ylcnfrht",
+    "url": "https://github.com/ylcnfrht"
+  },
+  "type": "module",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "nestjs": [
+        "./dist/cjs/nestjs.d.ts"
+      ],
+      "testing": [
+        "./dist/cjs/testing.d.ts"
+      ],
+      "fetch": [
+        "./dist/cjs/fetch.d.ts"
+      ],
+      "otel": [
+        "./dist/cjs/otel.d.ts"
+      ],
+      "prometheus": [
+        "./dist/cjs/prometheus.d.ts"
+      ],
+      "http": [
+        "./dist/cjs/http.d.ts"
+      ],
+      "redis": [
+        "./dist/cjs/redis.d.ts"
+      ],
+      "adapters": [
+        "./dist/cjs/adapters.d.ts"
+      ],
+      "axios": [
+        "./dist/cjs/axios.d.ts"
+      ],
+      "fastify": [
+        "./dist/cjs/fastify.d.ts"
+      ],
+      "koa": [
+        "./dist/cjs/koa.d.ts"
+      ],
+      "hystrix": [
+        "./dist/cjs/hystrix.d.ts"
+      ],
+      "outcome": [
+        "./dist/cjs/outcome.d.ts"
+      ]
+    }
+  },
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./outcome": {
+      "import": {
+        "types": "./dist/esm/outcome.d.ts",
+        "default": "./dist/esm/outcome.js"
+      },
+      "require": {
+        "types": "./dist/cjs/outcome.d.ts",
+        "default": "./dist/cjs/outcome.js"
+      }
+    },
+    "./testing": {
+      "import": {
+        "types": "./dist/esm/testing.d.ts",
+        "default": "./dist/esm/testing.js"
+      },
+      "require": {
+        "types": "./dist/cjs/testing.d.ts",
+        "default": "./dist/cjs/testing.js"
+      }
+    },
+    "./fetch": {
+      "import": {
+        "types": "./dist/esm/fetch.d.ts",
+        "default": "./dist/esm/fetch.js"
+      },
+      "require": {
+        "types": "./dist/cjs/fetch.d.ts",
+        "default": "./dist/cjs/fetch.js"
+      }
+    },
+    "./axios": {
+      "import": {
+        "types": "./dist/esm/axios.d.ts",
+        "default": "./dist/esm/axios.js"
+      },
+      "require": {
+        "types": "./dist/cjs/axios.d.ts",
+        "default": "./dist/cjs/axios.js"
+      }
+    },
+    "./otel": {
+      "import": {
+        "types": "./dist/esm/otel.d.ts",
+        "default": "./dist/esm/otel.js"
+      },
+      "require": {
+        "types": "./dist/cjs/otel.d.ts",
+        "default": "./dist/cjs/otel.js"
+      }
+    },
+    "./prometheus": {
+      "import": {
+        "types": "./dist/esm/prometheus.d.ts",
+        "default": "./dist/esm/prometheus.js"
+      },
+      "require": {
+        "types": "./dist/cjs/prometheus.d.ts",
+        "default": "./dist/cjs/prometheus.js"
+      }
+    },
+    "./http": {
+      "import": {
+        "types": "./dist/esm/http.d.ts",
+        "default": "./dist/esm/http.js"
+      },
+      "require": {
+        "types": "./dist/cjs/http.d.ts",
+        "default": "./dist/cjs/http.js"
+      }
+    },
+    "./fastify": {
+      "import": {
+        "types": "./dist/esm/fastify.d.ts",
+        "default": "./dist/esm/fastify.js"
+      },
+      "require": {
+        "types": "./dist/cjs/fastify.d.ts",
+        "default": "./dist/cjs/fastify.js"
+      }
+    },
+    "./koa": {
+      "import": {
+        "types": "./dist/esm/koa.d.ts",
+        "default": "./dist/esm/koa.js"
+      },
+      "require": {
+        "types": "./dist/cjs/koa.d.ts",
+        "default": "./dist/cjs/koa.js"
+      }
+    },
+    "./hystrix": {
+      "import": {
+        "types": "./dist/esm/hystrix.d.ts",
+        "default": "./dist/esm/hystrix.js"
+      },
+      "require": {
+        "types": "./dist/cjs/hystrix.d.ts",
+        "default": "./dist/cjs/hystrix.js"
+      }
+    },
+    "./redis": {
+      "import": {
+        "types": "./dist/esm/redis.d.ts",
+        "default": "./dist/esm/redis.js"
+      },
+      "require": {
+        "types": "./dist/cjs/redis.d.ts",
+        "default": "./dist/cjs/redis.js"
+      }
+    },
+    "./adapters": {
+      "import": {
+        "types": "./dist/esm/adapters.d.ts",
+        "default": "./dist/esm/adapters.js"
+      },
+      "require": {
+        "types": "./dist/cjs/adapters.d.ts",
+        "default": "./dist/cjs/adapters.js"
+      }
+    },
+    "./nestjs": {
+      "import": {
+        "types": "./dist/esm/nestjs.d.ts",
+        "default": "./dist/esm/nestjs.js"
+      },
+      "require": {
+        "types": "./dist/cjs/nestjs.d.ts",
+        "default": "./dist/cjs/nestjs.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "!src/**/*.test.ts"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.16"
+  },
+  "scripts": {
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist/cjs/package.json','{\\\"type\\\":\\\"commonjs\\\"}')\" && node scripts/browser.mjs",
+    "typecheck": "tsc",
+    "test": "node --test test/*.test.ts",
+    "check:package": "npm run build && npx -y publint && npx -y @arethetypeswrong/cli --pack .",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build && node scripts/size.mjs",
+    "check:size": "npm run build && node scripts/size.mjs"
+  },
+  "peerDependencies": {
+    "@nestjs/common": ">=10",
+    "@nestjs/core": ">=10",
+    "@opentelemetry/api": "^1.4.0",
+    "axios": ">=1.0.0",
+    "fastify": ">=4",
+    "koa": ">=2",
+    "prom-client": ">=14"
+  },
+  "peerDependenciesMeta": {
+    "@nestjs/common": {
+      "optional": true
+    },
+    "@nestjs/core": {
+      "optional": true
+    },
+    "@opentelemetry/api": {
+      "optional": true
+    },
+    "prom-client": {
+      "optional": true
+    },
+    "axios": {
+      "optional": true
+    },
+    "fastify": {
+      "optional": true
+    },
+    "koa": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@nestjs/common": "^11.2.8",
+    "@nestjs/core": "^11.2.8",
+    "@opentelemetry/api": "^1.10.0",
+    "@opentelemetry/sdk-metrics": "^3.1.0",
+    "@opentelemetry/sdk-trace-base": "^2.12.0",
+    "@types/koa": "^3.0.3",
+    "@types/node": "^26.6.6",
+    "@types/pg": "^8.23.1",
+    "axios": "^1.21.0",
+    "esbuild": "^0.28.2",
+    "fastify": "^5.12.8",
+    "hono": "^4.13.18",
+    "ioredis": "^5.11.1",
+    "koa": "^3.3.0",
+    "pg": "^8.23.1",
+    "prom-client": "^15.1.3",
+    "rate-limiter-flexible": "^11.3.0",
+    "redis": "^6.3.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "typescript": "^7.0.2"
+  },
+  "unpkg": "./dist/browser/resilience-pipeline.min.js",
+  "jsdelivr": "./dist/browser/resilience-pipeline.min.js"
+}

@@ -1,0 +1,181 @@
+---
+title: Hedging
+description: Start extra attempts when a call is slow or fails, keep the first good result and abort the rest. Latency, parallel and fallback modes.
+sidebar:
+  order: 5
+---
+import HedgingTimeline from '../../../components/HedgingTimeline.tsx';
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+Hedging cuts tail latency. If the first attempt hasn't answered after a delay, it starts a second one **without cancelling the first**, and keeps whichever good result arrives first. The losers are aborted.
+
+Use it for idempotent reads whose latency has a long tail: a replica that's sometimes slow, a search query, a cache cluster. Don't use it for writes, or when the extra load would hurt a struggling dependency; every hedge is another request. Unlike retry, it doesn't wait for a failure before trying again.
+
+## Example
+
+<Tabs syncKey="builder">
+<TabItem label="ResiliencePipelineBuilder">
+
+```ts twoslash
+declare function search(query: string, signal: AbortSignal): Promise<string[]>;
+// ---cut---
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder<string[]>()
+  .addHedging({
+    delay: '150ms',        // ≈ your p95: start a second attempt if the first is slower
+    maxHedgedAttempts: 1,  // 2 calls at most
+  })
+  .addTimeout('1s')        // per attempt
+  .build();
+
+const hits = await pipeline.execute(({ signal }) => search('red shoes', signal));
+```
+
+</TabItem>
+<TabItem label="PipelineBuilder (smallest bundle)">
+
+```ts twoslash
+declare function search(query: string, signal: AbortSignal): Promise<string[]>;
+// ---cut---
+import { PipelineBuilder, hedgingStrategy, timeoutStrategy } from 'resilience-pipeline';
+
+const pipeline = new PipelineBuilder<string[]>()
+  .add(hedgingStrategy({ delay: '150ms', maxHedgedAttempts: 1 }))
+  .add(timeoutStrategy('1s'))
+  .build();
+
+const hits = await pipeline.execute(({ signal }) => search('red shoes', signal));
+```
+
+</TabItem>
+</Tabs>
+
+Pass `signal` to your I/O. That's how the losing attempts are cancelled.
+
+## Modes
+
+The sign of `delay` picks the mode.
+
+| `delay` | Mode | Next attempt starts | Use it for |
+|---|---|---|---|
+| `> 0` (default `2000`) | Latency | After `delay` without an answer, or at once after a handled failure | Cutting tail latency. |
+| `0` | Parallel | Immediately: all attempts race | Lowest latency at the highest cost. |
+| `< 0` | Fallback | Only after the previous attempt **failed** | Trying another replica or endpoint in turn. Like retry without delays. |
+
+<HedgingTimeline client:visible />
+
+## How it works
+
+1. The primary attempt starts (`context.attemptNumber` 0).
+2. While fewer than `1 + maxHedgedAttempts` attempts have started, the strategy waits up to the delay for any attempt to finish. If none does, it starts the next one and reports `OnHedging`.
+3. When an attempt finishes:
+   - If `shouldHandle` doesn't match it (a success, or an error that isn't transient, such as a 404), it **wins**. The other attempts are aborted and the outcome is returned right away; hedging doesn't wait for the losers to settle.
+   - If it's a handled failure, the next attempt starts at once (if any are left), and the others keep running.
+4. When every attempt has failed, the **primary's** failure is returned.
+
+The default `shouldHandle` is the same as retry's: errors except 4xx (408/429 count), aborts and rejections. Results never trigger a hedge unless your predicate says so.
+
+## Per-attempt context
+
+Each attempt gets its own:
+
+- `signal`, linked to the caller's. Aborting the execution aborts all attempts; a winner aborts only the others.
+- `attemptNumber`: 0 for the primary, then 1, 2, … in the order attempts start. One counter covers the whole execution, so with a retry around hedging or inside the hedged attempts every attempt still gets a distinct number, safe for per-attempt idempotency keys. (`onHedging`, `delayGenerator` and `actionGenerator` receive hedging's own count: 1 for the first hedge.)
+- **copy of `properties`.** Parallel attempts can't overwrite each other's values. When an attempt wins, its properties are merged back into the caller's map. Losers' writes are dropped.
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+declare function query(replica: number, signal: AbortSignal): Promise<string>;
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder<string>().addHedging({ delay: 0, maxHedgedAttempts: 2 }).build();
+
+const properties = new Map<string, unknown>();
+await pipeline.execute(
+  ({ signal, attemptNumber, properties }) => {
+    properties.set('replica', attemptNumber);
+    return query(attemptNumber, signal);
+  },
+  { properties },
+);
+properties.get('replica'); // the winner's replica
+```
+
+## A different action per attempt
+
+`actionGenerator` returns the action for a hedged attempt, for example another region or endpoint. Return `undefined` to repeat the original callback. It isn't called for the primary.
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+// ---cut---
+const regions = ['https://eu.api.example.com', 'https://us.api.example.com', 'https://ap.api.example.com'];
+
+const pipeline = new ResiliencePipelineBuilder<Response>()
+  .addHedging({
+    delay: -1, // fallback mode: next region only after a failure
+    maxHedgedAttempts: 2,
+    actionGenerator: ({ attemptNumber }) => ({ signal }) => fetch(`${regions[attemptNumber]}/stock`, { signal }),
+  })
+  .build();
+
+const res = await pipeline.execute(({ signal }) => fetch(`${regions[0]}/stock`, { signal }));
+```
+
+The generated action replaces the strategies added after hedging as well as the callback. To keep them, call the `callback` the generator receives: it runs the rest of the pipeline with the original callback, and throws on failure.
+
+## Dynamic delays
+
+`delayGenerator` returns the delay before each next attempt. It gets `{ attemptNumber, context }`, where `attemptNumber` is the attempt about to start (1 for the first hedge). The sign rules above apply per step: return `-1` to wait for a failure.
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+// ---cut---
+// First hedge after 100 ms, the next one only if something fails.
+const pipeline = new ResiliencePipelineBuilder()
+  .addHedging({ maxHedgedAttempts: 2, delayGenerator: ({ attemptNumber }) => (attemptNumber === 1 ? 100 : -1) })
+  .build();
+```
+
+## Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `name` | `string` | `'Hedging'` | Strategy name in telemetry and `getStrategy()`. |
+| `shouldHandle` | `(args) => boolean` (or a promise) or `PredicateBuilder` | transient errors | Which outcomes count as failed. Anything else wins. |
+| `maxHedgedAttempts` | `number` ≥ 1 | `1` | Attempts in addition to the primary. |
+| `delay` | `Duration` | `2000` | Wait before the next attempt. `> 0` latency, `0` parallel, `< 0` fallback mode. |
+| `delayGenerator` | `({ attemptNumber, context }) => Duration \| undefined` (or a promise) | none | Per-attempt delay; overrides `delay` (`undefined` keeps it). |
+| `actionGenerator` | `({ attemptNumber, context, callback }) => action \| undefined` | none | Action for a hedged attempt. `undefined` repeats the original. |
+| `onHedging` | `(args: OnHedgingArgs) => void` | none | Before each hedged attempt. Gets `attemptNumber`, `duration` (ms since the primary started) and `context`. Awaited. |
+
+`Duration` is milliseconds or a string such as `'150ms'`. `maxHedgedAttempts < 1` throws `RangeError` on `build()`.
+
+## Calls that must not run twice
+
+With `execute(fn, { idempotent: false })`, hedging never starts an attempt while another one may be in flight. After a failure it only starts another if the failed attempt never started, i.e. it was a rejection, and only if your `shouldHandle` handles rejections. With the default predicate, a non-idempotent call runs exactly once.
+
+## Events and errors
+
+| Telemetry event | Callback | When |
+|---|---|---|
+| `OnHedging` | `onHedging` | Before each hedged attempt (not the primary). |
+| `OnExecutionAttempt` | none | Every call of the original callback, emitted by the pipeline. Actions from `actionGenerator` that don't call `callback` aren't counted. |
+
+Hedging raises no error of its own. When every attempt fails, the primary attempt's error is returned. Losers are aborted with a plain `abort()`, so their signal's reason is an `AbortError`. They are also aborted when hedging itself fails (an `actionGenerator`, `onHedging` or `delayGenerator` that throws). With `executeStream`, a loser that already produced its first chunk has its stream closed, and so does a stream your `shouldHandle` rejected (unless it ends up being the returned result).
+
+## Common mistakes
+
+<Aside type="caution" title="Hedging multiplies load">
+Each hedge is another request. With `delay` near your p95, about 5% of calls send a second request. A delay of `0` doubles (or triples) all traffic. Combine it with a [circuit breaker](/strategies/circuit-breaker/) or a [retry budget](/strategies/retry/#retry-budget) on the same dependency.
+</Aside>
+
+- **Not passing `signal`.** The losers keep running and their responses are thrown away.
+- **Timeout outside hedging when you meant per attempt.** `addTimeout().addHedging()` limits the whole race; `addHedging().addTimeout()` limits each attempt. Both are useful; pick on purpose.
+- **Hedging writes.** Use `idempotent: false` for them, or don't hedge them.
+
+## Related
+
+- [Retry](/strategies/retry/)
+- [Timeout](/strategies/timeout/)
+- [Context, signals & deadline propagation](/concepts/context-and-signals/)

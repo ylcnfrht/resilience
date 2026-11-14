@@ -1,0 +1,185 @@
+---
+title: From axios-retry
+description: Replace axiosRetry() with attachResilience() from resilience-pipeline/axios. Option mapping, per-request config, and the new defaults (timeouts, breaker).
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+**Who this is for:** apps that call `axiosRetry(instance, options)` and want backoff with jitter, `Retry-After`, timeouts per attempt and a circuit breaker per host, without touching their call sites.
+
+`attachResilience(instance, options)` from `resilience-pipeline/axios` takes the same place as `axiosRetry(instance, options)`: one call per axios instance, interceptors and call sites unchanged, per-request overrides on the request config. The difference is what you get without options: axios-retry retries 3 times with no delay; `attachResilience` adds a total timeout, a timeout per attempt, exponential backoff with jitter, and a circuit breaker per host. See the [axios integration](/integrations/axios/) for the full reference.
+
+## Option mapping
+
+| axios-retry 4 | `attachResilience` |
+|---|---|
+| `axiosRetry(instance, options)` | `attachResilience(instance, options)`, returns `{ eject() }` |
+| `retries` (default 3) | `retry: { maxRetryAttempts }` (default 3). `retry: false` disables retries |
+| `retryCondition` (default `isNetworkOrIdempotentRequestError`) | `retryOn`: status codes, or `({ response, error, attemptNumber }) => boolean` |
+| `retryDelay` (default: no delay, or `Retry-After` when present) | default: exponential from 200 ms with full jitter, `Retry-After` honoured |
+| `retryDelay: axiosRetry.exponentialDelay` | the default; tune with `retry: { delay, maxDelay, useJitter }` |
+| `retryDelay: axiosRetry.linearDelay()` | `retry: { backoffType: 'linear', delay }` |
+| `retryDelay: (retryCount, error) => ms` | `retry: { delayGenerator: ({ outcome, attemptNumber }) => ms }` |
+| `shouldResetTimeout: false` (axios `timeout` covers all retries) | `totalTimeout` (default 30 s) |
+| `shouldResetTimeout: true` | `attemptTimeout` (default 10 s) |
+| `onRetry(retryCount, error, config)` | `retry: { onRetry: (args) => … }`; to change the request, `onBeforeAttempt(config, context)` |
+| `onMaxRetryTimesExceeded(error, retryCount)` | `retry: { onRetryExhausted: (args) => … }` |
+| `validateResponse` | `retryOn` with a predicate over `response` |
+| per request: `{ 'axios-retry': { retries: 0 } }` | per request: `{ resilience: { retries: 0 } }` |
+| `isNetworkError`, `isRetryableError`, … helpers | built into the default `retryOn` (see below) |
+| not available | `circuitBreaker` (per host), `concurrency`, `retryUnsafeMethods`, `timeProvider` |
+
+## Side by side
+
+### Defaults
+
+<Tabs syncKey="axios-retry">
+<TabItem label="axios-retry">
+
+```ts
+import axios from 'axios';
+import axiosRetry from 'axios-retry';
+
+const api = axios.create({ baseURL: 'https://api.example.com', timeout: 10_000 });
+axiosRetry(api, { retries: 3, retryDelay: axiosRetry.exponentialDelay });
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts
+import axios from 'axios';
+import { attachResilience } from 'resilience-pipeline/axios';
+
+const api = axios.create({ baseURL: 'https://api.example.com' });
+attachResilience(api, { name: 'api', totalTimeout: '10s' });
+```
+
+</TabItem>
+</Tabs>
+
+Leave axios' own `timeout` at 0 and let the pipeline time out: an axios timeout fails the attempt with `ECONNABORTED`, which is then retried.
+
+### Custom condition, delay and logging
+
+<Tabs syncKey="axios-retry">
+<TabItem label="axios-retry">
+
+```ts
+axiosRetry(api, {
+  retries: 5,
+  retryCondition: (error) =>
+    axiosRetry.isNetworkOrIdempotentRequestError(error) || error.response?.status === 429,
+  retryDelay: (retryCount) => retryCount * 1000,
+  onRetry: (retryCount, error) => log.warn(`retry ${retryCount}: ${error.message}`),
+  onMaxRetryTimesExceeded: (error) => log.error(`gave up: ${error.message}`),
+});
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts
+import { attachResilience } from 'resilience-pipeline/axios';
+
+attachResilience(api, {
+  name: 'api',
+  retryOn: [429, 500, 502, 503, 504], // network errors and timeouts are still retried
+  retry: {
+    maxRetryAttempts: 5,
+    backoffType: 'linear',
+    delay: '1s',
+    onRetry: ({ attemptNumber }) => log.warn(`retry ${attemptNumber + 1}`),
+    onRetryExhausted: () => log.error('gave up'),
+  },
+});
+```
+
+</TabItem>
+</Tabs>
+
+A status list in `retryOn` replaces the default statuses; network errors and timeouts stay retryable. A function in `retryOn` decides alone, for errors as well as responses.
+
+### Per-request overrides
+
+<Tabs syncKey="axios-retry">
+<TabItem label="axios-retry">
+
+```ts
+await api.get('/report', { 'axios-retry': { retries: 0 } });
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts
+await api.get('/report', { resilience: { retries: 0, timeout: '2m' } });
+await api.post('/orders', order, { resilience: { idempotent: true } });
+```
+
+</TabItem>
+</Tabs>
+
+Importing `resilience-pipeline/axios` adds the typed `resilience` field to `AxiosRequestConfig`. Fields: `retries`, `retryOn`, `timeout`, `attemptTimeout`, `idempotent`.
+
+### Refreshing a token between attempts
+
+<Tabs syncKey="axios-retry">
+<TabItem label="axios-retry">
+
+```ts
+axiosRetry(api, {
+  retryCondition: (error) => error.response?.status === 401,
+  onRetry: async (_count, _error, config) => {
+    config.headers.Authorization = `Bearer ${await tokens.refresh()}`;
+  },
+});
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts
+import { AxiosHeaders } from 'axios';
+import { attachResilience } from 'resilience-pipeline/axios';
+
+attachResilience(api, {
+  retryOn: [401, 429, 503],
+  onBeforeAttempt: async (config, { attemptNumber }) => {
+    if (attemptNumber === 0) return;
+    const headers = new AxiosHeaders(config.headers as AxiosHeaders);
+    return { ...config, headers: headers.set('Authorization', `Bearer ${await tokens.refresh()}`) };
+  },
+});
+```
+
+</TabItem>
+</Tabs>
+
+`onBeforeAttempt` receives a copy of the config for each attempt and may return a replacement. It is needed because retries happen inside the adapter: request interceptors run once per request, not once per attempt (axios-retry re-sends the request through the instance, so its retries do run the interceptors again).
+
+## Behavioural differences to watch
+
+<Aside type="caution" title="A circuit breaker is on by default">
+Each host gets a breaker that opens at 50% failures over the last 20 calls (at least 10) and stays open 10 s. While it's open, requests fail at once with `BrokenCircuitError` (`code: 'CIRCUIT_OPEN'`) instead of an `AxiosError`. Catch it with `isBrokenCircuitError()`, or pass `circuitBreaker: false` to keep axios-retry's behaviour.
+</Aside>
+
+- **Timeouts are on by default.** 30 s for the whole call and 10 s per attempt. A slow endpoint that used to work may now fail with `TimeoutRejectedError`; raise `attemptTimeout` / `totalTimeout`, or set them per request. `totalTimeout: Infinity` disables the total budget.
+- **What is retried.** axios-retry's default retries network errors, and 429 or 5xx responses on `GET HEAD OPTIONS PUT DELETE`; it doesn't retry axios' own timeout (`ECONNABORTED`). Ours retries network errors (a fixed list of codes such as `ECONNRESET`, `ECONNABORTED`, `ETIMEDOUT`, `ERR_NETWORK`), attempt timeouts, and `408 429 500 502 503 504`, on `GET HEAD OPTIONS TRACE PUT DELETE`. Other 5xx statuses (501, 505…) are not retried.
+- **POST with an `Idempotency-Key` header** is retried automatically. `retryUnsafeMethods: true` retries every method; `resilience: { idempotent: false }` forbids retries for one request.
+- **Delays.** axios-retry waits 0 ms by default (or the `Retry-After` value); `exponentialDelay` starts at 200 ms plus up to 20% added randomness. Ours starts at 200 ms with full jitter (anywhere between 0 and the computed delay), and uses `Retry-After` when the response has one.
+- **Custom `delayGenerator` replaces the `Retry-After` handling.** If you set `retry.delayGenerator`, read the header yourself or `Retry-After` is ignored.
+- **Callback arguments.** axios-retry passes `retryCount` from 1, the error and the config. `onRetry` receives `{ outcome, context, attemptNumber, retryDelay, duration }`, with `attemptNumber` from 0. For a non-2xx status, `outcome.error` is the `AxiosError` and `outcome.error.response` the response.
+- **Errors reaching the caller.** After the last retry, the caller gets the original `AxiosError`, as with axios-retry. Rejections by the pipeline (`TimeoutRejectedError`, `BrokenCircuitError`, `BulkheadRejectedError`) are not `AxiosError`s.
+- **Removal.** axios-retry registers interceptors; `attachResilience` replaces the instance's adapter. `eject()` restores the previous adapter. A per-request `adapter` bypasses the pipeline.
+- **Bundled browser code** may need `getAdapter: axios.getAdapter` (see [Bundled browser code](/integrations/axios/#bundled-browser-code)).
+
+## What you gain
+
+- Timeouts per attempt and in total, a circuit breaker and an optional concurrency limit per host, `Retry-After` support.
+- Telemetry for every retry, timeout and breaker transition, exportable to OpenTelemetry or Prometheus.
+- The same engine as [`createResilientFetch()`](/integrations/fetch/), so fetch and axios clients behave the same.
+
+Related: [axios integration](/integrations/axios/), [fetch](/integrations/fetch/), [Retry](/strategies/retry/), [Circuit breaker](/strategies/circuit-breaker/).

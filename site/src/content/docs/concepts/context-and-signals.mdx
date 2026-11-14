@@ -1,0 +1,151 @@
+---
+title: Context, signals and deadlines
+description: The ResilienceContext every callback receives, how cancellation flows through AbortSignal, and how nested pipelines inherit an outer deadline.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every callback receives a `ResilienceContext`. Its most important field is `signal`: timeouts, hedging and caller
+cancellation all work by aborting it. JavaScript can't stop a running promise, so **pass `signal` to your I/O**.
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+const pipeline = new ResiliencePipelineBuilder().addTimeout('2s').build();
+// ---cut---
+await pipeline.execute(({ signal, attemptNumber }) =>
+  fetch('https://api.example.com/report', {
+    signal,
+    headers: { 'x-attempt': String(attemptNumber) },
+  }),
+);
+```
+
+## `ResilienceContext`
+
+| Field | Type | Description |
+|---|---|---|
+| `signal` | `AbortSignal` | Aborted when the caller cancels, an outer pipeline gives up, or a strategy (timeout, hedging) abandons this attempt |
+| `attemptNumber` | `number` | 0 for the first attempt, then 1, 2… for retries and hedged attempts, in the order they start. Unique within an execution, however retry and hedging are nested |
+| `operationKey` | `string \| undefined` | From `execute(fn, { operationKey })`; used by filters such as `setGlobalChaos({ filter })` |
+| `properties` | `Map<string, unknown>` | A bag shared by the strategies and the callback for this execution |
+| `idempotent` | `boolean` | `false` forbids repeating calls that may have started (default `true`) |
+| `operationName` | `string?` | Telemetry name for this execution (`execute(fn, { name })`) |
+| `attributes` | `Record<string, string \| number \| boolean>?` | Extra telemetry attributes for this execution |
+| `timeProvider` | `TimeProvider?` | Clock for this execution's delays and timeouts |
+
+## Execute options
+
+All fields are optional: `pipeline.execute(callback, options)`, and the same for `executeOutcome`, `settle`,
+`executeStream` and `wrap`.
+
+| Option | Default | Effect |
+|---|---|---|
+| `signal` | none | Cancels the execution. Combined with the signal of the execution this one runs inside, if any |
+| `operationKey` | none | Copied to `context.operationKey` |
+| `properties` | new `Map` | Initial `context.properties` |
+| `idempotent` | `true` | See [Calls that must not run twice](#calls-that-must-not-run-twice) |
+| `abortOnReturn` | `false` | Abort each attempt's signal as soon as its callback settles |
+| `name` | pipeline name | Operation name for spans and metrics |
+| `attributes` | none | Extra low-cardinality attributes for spans and OpenTelemetry metrics |
+| `timeProvider` | pipeline's clock | Clock for this run's retry delays, timeouts, hedging delays and chaos latency |
+
+A per-execution `timeProvider` only affects timing that belongs to the execution. Breakers, limiters, caches and locks
+keep the pipeline's clock, because their state spans executions.
+
+## Deadline propagation
+
+A pipeline executed *inside* another pipeline's callback inherits its signal. An outer timeout therefore cancels every
+call made underneath it, including calls that never received the signal:
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+// ---cut---
+const perRequest = new ResiliencePipelineBuilder().addTimeout('3s').build();
+const payments = new ResiliencePipelineBuilder({ name: 'payments' }).addRetry().build();
+
+// Deep inside a service: no signal parameter anywhere.
+async function chargeCustomer(id: string) {
+  return payments.execute(({ signal }) => fetch(`https://pay.internal/charge/${id}`, { signal }));
+}
+
+// At the edge, e.g. an HTTP handler:
+await perRequest.execute(() => chargeCustomer('c_42')); // the fetch is aborted when the 3 s budget runs out
+```
+
+The nested `signal` aborts when either its own strategies or any outer execution give up. This works through
+`AsyncLocalStorage`, so it needs a runtime that has it: Node, Bun, Deno, and Workers with `nodejs_compat`. In
+browsers, pass the signal explicitly (see [Runtimes](/concepts/runtimes/)).
+
+### Reading the context from anywhere
+
+Code that runs inside an execution but doesn't receive the context (a decorated method, a repository, a database
+helper) can read it:
+
+```ts twoslash
+import { getResilienceSignal, getResilienceContext } from 'resilience-pipeline';
+declare const db: { query(sql: string, options: { signal?: AbortSignal }): Promise<unknown[]> };
+// ---cut---
+export async function findOrders(customerId: string) {
+  const attempt = getResilienceContext()?.attemptNumber ?? 0;
+  return db.query(`select * from orders where customer_id = $1 -- attempt ${attempt}`, {
+    signal: getResilienceSignal(), // undefined outside an execution
+  });
+}
+```
+
+Both return `undefined` outside an execution, and always in browsers.
+
+## Calls that must not run twice
+
+Mark non-idempotent calls, such as a payment, with `idempotent: false`:
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+const pipeline = new ResiliencePipelineBuilder().addRetry().addConcurrencyLimiter(10).build();
+declare function createPayment(signal: AbortSignal): Promise<{ id: string }>;
+// ---cut---
+await pipeline.execute(({ signal }) => createPayment(signal), { idempotent: false });
+```
+
+Retry and hedging then only repeat the call when it never started, for example because a limiter rejected it. A failure that may have reached the dependency (a timeout, a 503, a dropped connection) is returned
+as is. Hedging never launches a parallel attempt while one may be in flight.
+
+## `abortOnReturn`
+
+Some callbacks start work that outlives them: a timer, a stream the caller only partly reads, a background refresh.
+`abortOnReturn: true` aborts the attempt's signal as soon as the callback settles, so that work stops too.
+
+## Typed properties
+
+`context.properties` is an untyped `Map`. `ResiliencePropertyKey` gives typed access, in the style of Polly:
+
+```ts twoslash
+import { ResiliencePipelineBuilder, ResiliencePropertyKey } from 'resilience-pipeline';
+// ---cut---
+const TENANT = new ResiliencePropertyKey<string>('tenant');
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addRetry({
+    onRetry: ({ context }) => console.log('retrying for', TENANT.get(context)),
+  })
+  .build();
+
+await pipeline.execute(
+  (context) => fetch(`https://api.example.com/${TENANT.get(context)}`, { signal: context.signal }),
+  { properties: new Map([[TENANT.key, 'acme']]) },
+);
+```
+
+<Aside type="caution">
+Timeout and hedging return as soon as they give up; they don't wait for a callback that ignores the signal. That
+callback keeps running in the background, and its result is discarded. Use `addTimeout({ timeout: '2s', cooperative: true })`
+if no work may outlive the timeout.
+</Aside>
+
+## Related
+
+- [Timeout](/strategies/timeout/) and [Hedging](/strategies/hedging/): the strategies that abort the signal
+- [Express and Hono](/integrations/express-and-hono/): a per-request deadline for every route
+- [Databases](/guides/databases/): drivers that ignore `AbortSignal`

@@ -1,0 +1,86 @@
+---
+title: Events catalog
+description: Every telemetry event the library emits, which strategy emits it, the shape of its args and the matching on* callback.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every event reaches three places at once:
+
+- `onTelemetry(listener)` listeners, in every runtime;
+- the `resilience-pipeline` [`diagnostics_channel`](https://nodejs.org/api/diagnostics_channel.html) on Node, Bun and Deno;
+- the adapters built on them: `/otel`, `/prometheus`, `createStats()`, `/hystrix`.
+
+Each message is a `TelemetryEvent`: `{ event, source: { pipelineName, strategyName, tags? }, context, args }`. The tables list `args`. Events are only built when someone listens, and a pipeline built with `telemetry: false` emits none.
+
+The strategy-level `on*` callbacks receive the same `args` object, so you can move code between a callback and a listener.
+
+```ts twoslash
+import { onTelemetry } from 'resilience-pipeline';
+
+const off = onTelemetry(({ event, source, args }) => {
+  if (event === 'OnCircuitOpened') console.warn(`${source.pipelineName}: circuit opened`, args);
+});
+// later: off();
+```
+
+## Pipeline events
+
+Emitted by every pipeline, whatever strategies it has.
+
+| Event | When | `args` | Callback |
+|---|---|---|---|
+| `OnPipelineExecuting` | An execution starts. | `{ context }` | none |
+| `OnPipelineExecuted` | An execution ends. | `{ outcome, duration }` | none |
+| `OnStrategyExecuted` | Each strategy finishes its part of an execution. `source.strategyName` names it. | `{ outcome, duration, context }` | none |
+| `OnExecutionAttempt` | Every call of your callback: the single attempt, each retry, each hedged attempt. | `{ outcome, context, attemptNumber, duration }` | none |
+
+Durations are milliseconds. `attemptNumber` is 0 for the first attempt; in `OnExecutionAttempt` it is the execution-wide `context.attemptNumber`, in strategy events the strategy's own count.
+
+## Strategy events
+
+| Event | Emitted by | When | `args` | Callback |
+|---|---|---|---|---|
+| `OnRetry` | Retry | Before each retry's delay. | `{ outcome, context, attemptNumber, retryDelay, duration }` | `onRetry` |
+| `OnRetryExhausted` | Retry | Retries ran out (or `maxRetryTime` passed) and the last outcome is still a failure. | `{ outcome, context, attemptNumber }` | `onRetryExhausted` |
+| `OnRetryBudgetExhausted` | Retry with `budget` | The shared budget refused a retry. | `{ outcome, context, attemptNumber }` | `onBudgetExhausted` |
+| `OnTimeout` | Timeout | The timeout fired. | `{ context, timeout }` | `onTimeout` |
+| `OnCircuitOpened` | Circuit breaker | The circuit opened, or was isolated by hand (`isManual: true`, `breakDuration: Infinity`). | `{ outcome, breakDuration, isManual, context }` | `onOpened` |
+| `OnCircuitHalfOpened` | Circuit breaker | The break ended and the first probe is let through. | `{ context }` | `onHalfOpened` |
+| `OnCircuitClosed` | Circuit breaker | The circuit closed (probes passed, or closed by hand). | `{ outcome, isManual, context }` | `onClosed` |
+| `OnCircuitRejected` | Circuit breaker | Every call the open (or full half-open) circuit refused. | `{ context, state, retryAfter }` | `onRejected` |
+| `OnHalfOpenProbeTimedOut` | Circuit breaker | A probe ran longer than `halfOpenMaxWait`; it counts as failed. | `{ context, halfOpenMaxWait }` | none |
+| `OnHealthCheckFailed` | `circuitHealthCheck()` extension | The periodic check failed (the circuit is then tripped). | `{ error }` | none |
+| `OnCircuitStoreError` | `sharedCircuitState()` extension | Reading or writing the shared store failed. | `{ error }` | none |
+| `OnCircuitStateSynced` | `sharedCircuitState()` extension | A newer state from another instance was adopted. | `{ snapshot }` | none |
+| `OnFallback` | Fallback, `addFallbackOn` | Before the fallback value is produced. | `{ outcome, context }` | `onFallback` |
+| `OnHedging` | Hedging | Before each extra (hedged) attempt starts. | `{ attemptNumber, duration, context }` | `onHedging` |
+| `OnRateLimiterRejected` | Concurrency limiter, adaptive limiter, token bucket, fixed/sliding window, partitioned | A call was rejected. | `{ context, retryAfter }` | `onRejected` |
+| `OnRateLimiterInsuranceUsed` | Any permit limiter with `insurance` | The remote algorithm failed or was slow; the in-memory one answered. | `{ context, error }` | none |
+| `OnLimitChanged` | Adaptive concurrency limiter | The limit moved. | `{ oldLimit, newLimit, sample }` | `onLimitChanged` |
+| `OnCacheHit` | Cache | A fresh value was served. | `{ context, key, value, age }` | `onCacheHit` |
+| `OnCacheMiss` | Cache | No fresh value; the call goes through. | `{ context, key }` | `onCacheMiss` |
+| `OnStaleServed` | Cache with `staleTtl`, stale fallback | The call failed and a stale value hid the failure. | `{ context, key, value, age, outcome }` | `onStaleServed` |
+| `OnCacheStoreFailed` | Cache | The store threw; the call continues as if uncached. | `{ context, key, operation, error }` | none |
+| `OnCoalesced` | Cache, coalesce | A call joined an identical one already in flight. | `{ context, key, waiters }` | none |
+| `OnLockRejected` | Lock | The lease wasn't acquired within `wait`. | `{ context, key }` | none |
+| `OnLockLost` | Lock | Lease renewal failed while the callback ran. | `{ context, key }` | `onLockLost` |
+| `Chaos.OnFault` | Chaos fault | A fault was injected. | `{ context, fault }` | `onFaultInjected` |
+| `Chaos.OnOutcome` | Chaos outcome | A fake outcome was injected. | `{ context, outcome }` | `onOutcomeInjected` |
+| `Chaos.OnLatency` | Chaos latency | Latency was injected. | `{ context, latency }` | `onLatencyInjected` |
+| `Chaos.OnBehavior` | Chaos behavior | The behavior ran. | `{ context }` | `onBehaviorInjected` |
+| `Chaos.OnGlobal` | `setGlobalChaos()` | Global chaos touched a callback. | `{ context, latency, fault }` (`fault` is a boolean) | none |
+
+Retry's `onFailedAttempt` (every handled failure, with `retriesLeft`) has no event: `OnExecutionAttempt` covers every attempt.
+
+<Aside type="tip" title="Coming from Polly">
+The names follow Polly v8: `OnRetry`, `OnTimeout`, `OnCircuitOpened`, `OnHedging`, `OnRateLimiterRejected`, `Chaos.OnFault` and so on. Polly's `ExecutionAttempt`, `PipelineExecuting` and `PipelineExecuted` are `OnExecutionAttempt`, `OnPipelineExecuting` and `OnPipelineExecuted` here, and Polly only reports `ExecutionAttempt` from retry and hedging; this library reports it for every attempt.
+</Aside>
+
+## Your own events
+
+A custom strategy can emit events into the same stream with `report(source, 'OnMyEvent', context, args)`. Use the `source` your factory receives, so the event carries the pipeline's name and tags.
+
+Related: [Telemetry](/concepts/telemetry/), [OpenTelemetry](/integrations/opentelemetry/), [Prometheus](/integrations/prometheus/), [createStats](/integrations/stats/).

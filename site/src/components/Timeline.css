@@ -1,0 +1,64 @@
+/* Lane timeline shared by HedgingTimeline, CacheTimeline, LockLeaseTimeline, BatcherTimeline. */
+.rp-tl { margin: 0; }
+.rp-tl svg { display: block; max-width: 100%; overflow: visible; }
+.rp-tl .k-ok { --k: var(--rp-green); }
+.rp-tl .k-fail { --k: var(--rp-red); }
+.rp-tl .k-warn { --k: var(--rp-amber); }
+.rp-tl .k-info { --k: var(--rp-blue, #60a5fa); }
+.rp-tl .k-accent { --k: var(--sl-color-accent); }
+.rp-tl .k-lav { --k: var(--rp-accent-2); }
+.rp-tl .k-muted { --k: var(--sl-color-gray-3); }
+.rp-tl .rp-grid { stroke: var(--sl-color-gray-5); stroke-width: 1; stroke-dasharray: 2 4; }
+.rp-tl .rp-axis { fill: var(--sl-color-gray-3); font-size: 11px; font-family: var(--sl-font-mono); }
+.rp-tl-sep { stroke: var(--sl-color-gray-5); stroke-width: 1; opacity: 0.5; }
+.rp-tl-lane { fill: var(--sl-color-gray-2); font-size: 12px; font-family: var(--sl-font-mono); font-weight: 600; }
+.rp-tl-sub { fill: var(--sl-color-gray-3); font-size: 10.5px; font-family: var(--sl-font-mono); font-weight: 400; }
+.rp-tl-band rect { fill: color-mix(in srgb, var(--k) 10%, transparent); }
+.rp-tl-band text { fill: var(--k); font-size: 10.5px; font-family: var(--sl-font-mono); }
+.rp-tl-guide line { stroke: var(--sl-color-gray-3); stroke-width: 1; stroke-dasharray: 4 3; }
+.rp-tl-guide text { fill: var(--sl-color-gray-3); font-size: 10.5px; font-family: var(--sl-font-mono); }
+.rp-tl-seg rect { fill: color-mix(in srgb, var(--k) 42%, transparent); stroke: var(--k); stroke-width: 1; }
+.rp-tl-seg rect.rp-tl-hatch { stroke: none; }
+.rp-tl-hatchline { stroke: var(--sl-color-gray-2); stroke-width: 1.5; opacity: 0.45; }
+.rp-tl-seg text { fill: var(--sl-color-white); font-size: 10.5px; font-family: var(--sl-font-mono); pointer-events: none; }
+.rp-tl-mark circle,
+.rp-tl-mark path { fill: var(--k); stroke: var(--sl-color-black); stroke-width: 1.5; }
+.rp-tl-mark path.rp-tl-stroke { fill: none; stroke: var(--k); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.rp-tl-mark text {
+  fill: var(--k);
+  font-size: 10.5px;
+  font-family: var(--sl-font-mono);
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: var(--sl-color-black);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.rp-tl-mark tspan { fill: var(--k); }
+.rp-tl figcaption { font-size: 0.75rem; color: var(--d-muted); margin-top: 0.35rem; display: flex; flex-direction: column; gap: 0.3rem; }
+.rp-tl-legend { display: flex; flex-wrap: wrap; gap: 0.25rem 0.9rem; font-family: var(--sl-font-mono); font-size: 0.72rem; }
+.rp-tl-key { display: inline-flex; align-items: center; gap: 0.35rem; }
+.rp-tl-key::before {
+  content: '';
+  width: 0.85rem;
+  height: 0.55rem;
+  border-radius: 2px;
+  border: 1px solid var(--k);
+  background: color-mix(in srgb, var(--k) 42%, transparent);
+}
+.rp-tl-key[data-hatch]::before {
+  background: repeating-linear-gradient(45deg, color-mix(in srgb, var(--sl-color-gray-2) 45%, transparent) 0 1.5px, transparent 1.5px 4px), color-mix(in srgb, var(--k) 42%, transparent);
+}
+.rp-tl-key[data-symbol]::before { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--k); }
+.rp-tl-key[data-symbol='diamond']::before { border-radius: 1px; transform: rotate(45deg) scale(0.85); }
+.rp-tl-key:is([data-symbol='x'], [data-symbol='tick'])::before { content: '✕'; width: auto; height: auto; border: 0; background: none; color: var(--k); font-weight: 700; }
+.rp-tl-key[data-symbol='tick']::before { content: '✓'; }
+.rp-tl-reveal { transform-box: fill-box; transform-origin: left center; animation: rp-tl-reveal 1.1s ease-out; }
+@keyframes rp-tl-reveal { from { transform: scaleX(0); } }
+@media (prefers-reduced-motion: reduce) { .rp-tl-reveal { animation: none; } }
+
+/* Bits the four timeline widgets share below the chart. */
+.rp-tl-foot { margin: 0.6rem 0 0; }
+.rp-tl-foot b { font-family: var(--sl-font-mono); color: var(--sl-color-white); }
+.rp-tl-code { display: block; margin-top: 0.6rem; font-size: 0.75rem; overflow-x: auto; white-space: pre; padding: 0.4rem 0.6rem; border-radius: 6px; background: var(--sl-color-black); }
+.rp-tl-stats { margin-top: 0.75rem; }

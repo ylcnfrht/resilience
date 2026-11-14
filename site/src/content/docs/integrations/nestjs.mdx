@@ -1,0 +1,189 @@
+---
+title: NestJS
+description: A global module with named pipelines, method decorators for providers and controllers (@Retry, @Timeout, @UsePipeline…), registry injection and an exception filter.
+sidebar:
+  order: 6
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`resilience-pipeline/nestjs` adds a global `ResilienceModule` and method decorators for **providers**: the services, repositories and API clients that call your dependencies. A decorated method runs through its own pipeline; `@UsePipeline(name)` shares a named one (and its circuit breaker) between methods.
+
+```sh
+npm i resilience-pipeline   # @nestjs/common and @nestjs/core >= 10 are optional peer dependencies
+```
+
+## Setup
+
+```ts title="app.module.ts"
+import { Module } from '@nestjs/common';
+import { ResilienceModule } from 'resilience-pipeline/nestjs';
+
+@Module({
+  imports: [
+    ResilienceModule.forRoot({
+      pipelines: {
+        // One circuit breaker for the whole payment API, shared by every method that uses it.
+        'payment-api': (b) =>
+          b
+            .addRetry({ maxRetryAttempts: 3, backoffType: 'exponential', useJitter: true })
+            .addCircuitBreaker({ failureRatio: 0.5, minimumThroughput: 20 })
+            .addTimeout('2s'),
+      },
+    }),
+  ],
+  providers: [PaymentService],
+})
+export class AppModule {}
+```
+
+```ts title="payment.service.ts"
+import { Injectable } from '@nestjs/common';
+import { Fallback, Retry, Timeout, UsePipeline, getResilienceSignal } from 'resilience-pipeline/nestjs';
+
+@Injectable()
+export class PaymentService {
+  @UsePipeline('payment-api')
+  async getBalance(accountId: string) {
+    const res = await fetch(`${API}/accounts/${accountId}/balance`, { signal: getResilienceSignal() });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  // An inline pipeline for this method only. The top decorator is the outermost strategy.
+  @Fallback({ fallbackAction: () => ({ rates: cachedRates }) })
+  @Retry({ maxRetryAttempts: 2, delay: 100 })
+  @Timeout(500)
+  async getRates() {
+    const res = await fetch(`${API}/rates`, { signal: getResilienceSignal() });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+}
+```
+
+In `getRates`, each attempt gets 500 ms (the timeout is inside the retry), and the fallback catches whatever is left.
+
+### Options from configuration
+
+```ts
+ResilienceModule.forRootAsync({
+  imports: [ConfigModule],
+  inject: [ConfigService],
+  useFactory: (config: ConfigService) => ({
+    pipelines: {
+      'payment-api': (b) => b.addTimeout(config.get<number>('PAYMENT_TIMEOUT_MS', 2000)),
+    },
+  }),
+});
+```
+
+| Option | Type | Description |
+|---|---|---|
+| `pipelines` | `Record<string, (builder) => void>` | Named pipelines, built once into a `ResiliencePipelineRegistry`. Used by `@UsePipeline(name)` and injectable. |
+| `imports`, `inject`, `useFactory` | (`forRootAsync` only) | Standard Nest async provider options. `useFactory` may return a promise. |
+
+The module is global: import it once in the root module. On `app.close()` the registry is disposed, which stops breaker health checks and shared-state sync timers.
+
+## Decorators
+
+| Decorator | Equivalent |
+|---|---|
+| `@UsePipeline(name)` | `addPipeline(registry.getPipeline(name))`: the named pipeline, its state shared with every other user |
+| `@Retry(options?)` | `addRetry(options)` |
+| `@Timeout(ms \| options)` | `addTimeout(…)` |
+| `@CircuitBreaker(options?)` | `addCircuitBreaker(options)` |
+| `@Fallback(options)` | `addFallback(options)` |
+| `@Hedging(options?)` | `addHedging(options)` |
+| `@ConcurrencyLimit(n \| options, queueLimit?)` | `addConcurrencyLimiter(…)` |
+| `@RateLimit(options)` | `addRateLimiter(options)` (token bucket) |
+| `@Resilience((builder, registry) => …)` | anything else: chaos, cache, lock, sliding-window limits |
+
+Stacked decorators read top to bottom, outermost first, like `ResiliencePipelineBuilder` calls. They can be mixed: `@Fallback(…)` above `@UsePipeline('payment-api')` puts a per-method fallback around the shared pipeline.
+
+```ts
+@Resilience((b) => b.addCache({ ttl: '1m', key: () => 'exchange-rates' }))
+async getExchangeRates() { … }
+```
+
+### How they are applied
+
+- At startup (before routes are registered, or at `onModuleInit` in an application context), the module scans every provider and controller for decorated methods and replaces each with a wrapper that runs it through a pipeline built once, named `<Class>.<method>` for telemetry. Metadata on the method (guards, pipes, interceptors, `@HttpCode`…) is copied to the wrapper.
+- Other method decorators can sit above or below the resilience ones. The pipeline wraps the method as it ends up on the class, so it is outside any wrapping decorator.
+- **Request-scoped providers and controllers** (and those that depend on one) with a resilience decorator fail startup with an error: there is no single instance to wrap, and a pipeline per request would reset its breaker every time.
+- Each decorated method gets its **own** pipeline. An inline `@CircuitBreaker()` counts only that method's calls. Use `@UsePipeline` to share a breaker or a limiter between methods.
+- A wrapped method always returns a promise.
+- Calls made before the wrapping, such as from a constructor or another provider's `onModuleInit` that runs first, aren't protected.
+
+## Signals inside a method
+
+`getResilienceSignal()` and `getResilienceContext()` (re-exported from `resilience-pipeline/nestjs`) return the current execution's signal and context, through `AsyncLocalStorage`. Pass the signal to `fetch`, your HTTP client or your database driver, or timeouts and hedging can't stop the work. The context has `attemptNumber`, useful for logs or per-attempt idempotency keys.
+
+## Using the registry directly
+
+`ResiliencePipelineRegistry` is exported by the module. Inject it to run code through a named pipeline without a decorator, or to read breaker state for a health check:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { ResiliencePipelineRegistry } from 'resilience-pipeline';
+
+@Injectable()
+export class InventoryClient {
+  constructor(private readonly registry: ResiliencePipelineRegistry) {}
+
+  reserve(sku: string, qty: number) {
+    return this.registry.getPipeline('inventory-api').execute(({ signal }) => this.post('/reserve', { sku, qty }, signal));
+  }
+
+  health() {
+    return this.registry.circuitBreakers(); // every breaker, with its state
+  }
+}
+```
+
+## Mapping rejections to HTTP responses
+
+A rejection (open circuit, timeout, full bulkhead) reaches Nest as an unknown exception and becomes a `500`. An exception filter turns it into the [right status](/integrations/express-and-hono/#status-mapping). `describeResilienceError` matches by error code, so it also works when two copies of the package are loaded:
+
+```ts title="resilience-exception.filter.ts"
+import { type ArgumentsHost, Catch } from '@nestjs/common';
+import { BaseExceptionFilter } from '@nestjs/core';
+import { describeResilienceError } from 'resilience-pipeline/http';
+
+@Catch()
+export class ResilienceExceptionFilter extends BaseExceptionFilter {
+  catch(error: unknown, host: ArgumentsHost) {
+    const d = describeResilienceError(error);
+    if (!d || host.getType() !== 'http') return super.catch(error, host);
+    const res = host.switchToHttp().getResponse(); // Express res or Fastify reply
+    if (d.retryAfter !== undefined) res.header('retry-after', String(d.retryAfter));
+    res.status(d.httpStatus).send({ statusCode: d.httpStatus, code: d.code, message: d.message });
+  }
+}
+```
+
+```ts title="main.ts"
+const app = await NestFactory.create(AppModule);
+const { httpAdapter } = app.get(HttpAdapterHost);
+app.useGlobalFilters(new ResilienceExceptionFilter(httpAdapter));
+```
+
+For a request deadline that propagates into your decorated services, add the inbound middleware too. With the Express adapter: `app.use(resilienceMiddleware({ timeout: '5s' }))` from `resilience-pipeline/http` ([details](/integrations/express-and-hono/)).
+
+## `@nestjs/resilience`
+
+The Nest team publishes [`@nestjs/resilience`](https://github.com/nestjs/resilience) (pre-1.0 at the time of writing, peer dependency `@nestjs/*` 12). Its decorators sit on **entry points**: HTTP routes, GraphQL resolvers, microservice and WebSocket handlers, applied through an interceptor. Inside services it offers policy objects through `ResilienceService`. It covers retry, timeout, circuit breaker, bulkhead, fallback and outbound rate limits, with no third-party dependencies.
+
+This package puts its decorators on **provider methods**, works with Nest 10 and later, and brings the full strategy set (hedging, adaptive concurrency, sliding-window and Redis-backed rate limits, cache, lock, chaos), typed errors, and OpenTelemetry/Prometheus export.
+
+The two can be combined: `@nestjs/resilience` at the edge of a route, `resilience-pipeline` in the services and clients underneath. Both export a class named `ResilienceModule`, so alias one of them on import. A migration guide is at [Migrating from @nestjs/resilience](/migration/nestjs-resilience/).
+
+<Aside type="caution">
+If you register pipelines as your own providers instead of through the module, don't give them `Scope.REQUEST`. A new pipeline per request means a new circuit breaker and new limiters per request: they never see enough traffic to act.
+</Aside>
+
+## Related
+
+- [Context, signals and deadline propagation](/concepts/context-and-signals/)
+- [Typed errors](/concepts/typed-errors/)
+- [Retry](/strategies/retry/), [Circuit breaker](/strategies/circuit-breaker/), [Fallback](/strategies/fallback/)

@@ -1,0 +1,183 @@
+---
+title: Redis
+description: Share caches, locks with fencing tokens, rate limits and circuit breaker state between instances through Redis, with ioredis or node-redis.
+sidebar:
+  order: 7
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+In-memory state is per process. With ten instances behind a load balancer you get ten caches, ten "global" rate limits and ten circuit breakers that each have to learn on their own that a dependency is down. `resilience-pipeline/redis` moves that state to Redis:
+
+| Class | Plugs into | Gives you |
+|---|---|---|
+| `RedisCacheStore` | `addCache({ store })` | One cache for every instance. |
+| `RedisLockStore` | `addLock({ store })` | A mutex across processes, with fencing tokens. |
+| `RedisRateLimiter` | `RateLimiterStrategy` | One rate limit shared by every instance. |
+| `redisPartitionLimiter` | `addPartitionedRateLimiter({ limiter })` | One shared limit per key (user, tenant, API key). |
+| `RedisCircuitStateStore` | `sharedCircuitState({ store })` | One instance opens the circuit for all of them. |
+
+## The client
+
+The module imports no Redis library. It needs one method, ioredis' `eval(script, numKeys, ...keysAndArgs)`, typed as `RedisClient`. Every operation is a single Lua script, so each one is atomic on the server.
+
+<Tabs syncKey="redis-client">
+<TabItem label="ioredis">
+```ts
+import Redis from 'ioredis';
+
+const redis = new Redis(process.env.REDIS_URL!); // works as is
+```
+</TabItem>
+<TabItem label="node-redis">
+```ts
+import { createClient } from 'redis';
+import { fromNodeRedis } from 'resilience-pipeline/redis';
+
+const client = createClient({ url: process.env.REDIS_URL });
+await client.connect();
+const redis = fromNodeRedis(client); // node-redis v4+: eval(script, { keys, arguments })
+```
+</TabItem>
+<TabItem label="ioredis Cluster">
+```ts
+import { Cluster } from 'ioredis';
+import type { RedisClient } from 'resilience-pipeline/redis';
+
+const cluster = new Cluster([{ host: '10.0.0.1', port: 6379 }, { host: '10.0.0.2', port: 6379 }]);
+const redis = cluster as unknown as RedisClient;
+```
+</TabItem>
+</Tabs>
+
+Requirements: Redis 5 or later (the scripts call `TIME` before writing). Redis Cluster is supported: every script touches keys of a single hash slot.
+
+Every class takes `{ client, prefix? }`. `prefix` defaults to `'rp:'` and is prepended to every key. Don't put `{` or `}` in it (see [Cluster](#redis-cluster)).
+
+## Cache
+
+```ts twoslash
+import type { RedisClient } from 'resilience-pipeline/redis';
+declare const redis: RedisClient;
+declare function loadProduct(id: string, signal: AbortSignal): Promise<{ id: string; price: number }>;
+// ---cut---
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { RedisCacheStore } from 'resilience-pipeline/redis';
+
+const products = new ResiliencePipelineBuilder<{ id: string; price: number }>({ name: 'products' })
+  .addCache({ ttl: '5m', staleTtl: '1h', store: new RedisCacheStore({ client: redis }) })
+  .addTimeout('2s')
+  .build();
+
+const product = await products.execute(({ signal }) => loadProduct('42', signal), { operationKey: 'product:42' });
+```
+
+Entries are stored as JSON with `SET … PX`, so they expire natively after `ttl + staleTtl`. Values must be JSON-serializable: a `Date` comes back as a string, a `Map` as `{}`. Concurrent misses are coalesced per process, not across instances.
+
+## Lock
+
+```ts twoslash
+import type { RedisClient } from 'resilience-pipeline/redis';
+declare const redis: RedisClient;
+declare function buildReport(fencingToken: number | undefined, signal: AbortSignal): Promise<void>;
+// ---cut---
+import { ResiliencePipelineBuilder, getLockToken } from 'resilience-pipeline';
+import { RedisLockStore } from 'resilience-pipeline/redis';
+
+const nightly = new ResiliencePipelineBuilder({ name: 'nightly-report' })
+  .addLock({ key: () => 'nightly-report', store: new RedisLockStore({ client: redis }), ttl: '30s' })
+  .build();
+
+// Runs on one instance at a time; the others get LockNotAcquiredError right away.
+await nightly.execute(({ signal }) => buildReport(getLockToken(), signal));
+```
+
+- **Lease:** `SET <prefix>{lock:<key>} <owner> NX PX <ttl>`, renewed every `ttl / 3` while the callback runs. Renewal and release check the owner inside the script, so an instance whose lease expired can't extend or delete someone else's.
+- **Fencing token:** `INCR` of a per-key counter, in the same script as the lease, so tokens follow lease order exactly. Pass it to the resource you protect and have it reject writes with a token lower than the highest it has seen. The counter key never expires (it must only grow): one small key per lock key.
+
+<Aside type="caution" title="Single primary, no Redlock">
+Redis replication is asynchronous. After a failover, a lease or counter increments can be lost: two holders at once, or a repeated fencing token. For tokens to survive restarts, run with AOF (`appendfsync everysec` or `always`). The fencing check on the protected resource is what makes the lock safe; the lease alone is an efficiency measure.
+</Aside>
+
+## Rate limits shared by every instance
+
+`RedisRateLimiter` is a segmented sliding window (the same algorithm as the in-memory sliding window limiter) stored in a Redis hash. It runs on the **Redis server's clock** (`TIME`), so instances with skewed clocks still agree on the window. Run it with `RateLimiterStrategy`, which adds waiting, queueing and the other [rate limiter options](/strategies/rate-limiting/):
+
+```ts twoslash
+import type { RedisClient } from 'resilience-pipeline/redis';
+declare const redis: RedisClient;
+// ---cut---
+import { RateLimiterStrategy, ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { RedisRateLimiter, redisPartitionLimiter } from 'resilience-pipeline/redis';
+
+// 100 calls per minute to a partner API, across all instances.
+const partner = new ResiliencePipelineBuilder({ name: 'partner-api' })
+  .addStrategy((s) => new RateLimiterStrategy(new RedisRateLimiter({ client: redis, key: 'partner-api', permitLimit: 100, window: '1m' }), { queueTimeout: '2s' }, s))
+  .build();
+
+// 1000 requests per hour per tenant, across all instances.
+const perTenant = new ResiliencePipelineBuilder({ name: 'tenant-quota' })
+  .addPartitionedRateLimiter({
+    partitionKey: (ctx) => ctx.properties.get('tenant') as string,
+    limiter: redisPartitionLimiter({ client: redis, permitLimit: 1000, window: '1h' }),
+  })
+  .build();
+```
+
+| `RedisRateLimiter` option | Type | Default | Description |
+|---|---|---|---|
+| `client` | `RedisClient` | required | |
+| `key` | `string` | required | Limit identity: every instance with the same key and prefix shares one budget. Stored at `<prefix>rl:<key>`. |
+| `permitLimit` | `number` | required | Permits per window (integer ≥ 1). |
+| `window` | `Duration` | required | Window length. |
+| `segmentsPerWindow` | `number` | `10` | Buckets the window slides by. `1` is a fixed window aligned to the epoch. |
+| `prefix` | `string` | `'rp:'` | |
+
+`redisPartitionLimiter(options)` takes the same options without `key` (the partition key is used), plus the `RateLimiterStrategy` options (`queueTimeout`, `queueLimit`, `blockDuration`, `insurance`…). When the partitioned limiter evicts an idle partition, only the local object goes; the count lives on in Redis until the window passes.
+
+A rejection carries `retryAfter`: the time until enough old segments leave the window.
+
+<Aside type="tip" title="When Redis is down">
+`acquire` then throws, and the execution fails with the Redis error. To keep serving with a local limit instead, add `insurance: { algorithm, timeout }` with an in-memory algorithm sized per instance (the shared limit divided by the instance count). See [rate limiting](/strategies/rate-limiting/).
+</Aside>
+
+## Shared circuit state
+
+```ts twoslash
+import type { RedisClient } from 'resilience-pipeline/redis';
+declare const redis: RedisClient;
+// ---cut---
+import { ResiliencePipelineBuilder, sharedCircuitState } from 'resilience-pipeline';
+import { RedisCircuitStateStore } from 'resilience-pipeline/redis';
+
+const payments = new ResiliencePipelineBuilder({ name: 'payments' })
+  .addCircuitBreaker({
+    failureRatio: 0.5,
+    minimumThroughput: 20,
+    extensions: [sharedCircuitState({ store: new RedisCircuitStateStore({ client: redis }), key: 'payments', syncInterval: '5s' })],
+  })
+  .build();
+```
+
+Every state change is written to `<prefix>cb:<key>`, and every instance pulls the shared state every `syncInterval` (default 5 s). The write is a compare-and-set on the snapshot's `updatedAt`, so a slow instance can't overwrite a newer state with an older one. Each instance's rolling window of call results stays local. Store errors are reported as `OnCircuitStoreError` telemetry and don't fail calls. Keys don't expire.
+
+## Redis Cluster
+
+Each script uses keys of one hash slot only:
+
+| Store | Keys | Expiry |
+|---|---|---|
+| `RedisCacheStore` | `<prefix><key>` | `ttl + staleTtl` |
+| `RedisLockStore` | `<prefix>{lock:<key>}`, `<prefix>{lock:<key>}:fence` | lease: `ttl`; fence: never |
+| `RedisRateLimiter` | `<prefix>rl:<key>` | `window` after the last admitted call |
+| `RedisCircuitStateStore` | `<prefix>cb:<key>` | never |
+
+The lock's two keys share the hash tag `{<key>}`, so they land in the same slot. A `{…}` in `prefix` would become the hash tag instead and put every lock in one slot.
+
+Each call sends the script text with `EVAL` (no `EVALSHA` caching). That is a few hundred bytes per call; it only matters at very high call rates.
+
+## Related
+
+- [Running several instances with Redis](/guides/multi-instance/)
+- [Adapters](/integrations/adapters/): rate-limiter-flexible.
+- [Cache](/strategies/cache/), [Lock](/strategies/lock/), [Rate limiting](/strategies/rate-limiting/), [Circuit breaker](/strategies/circuit-breaker/)

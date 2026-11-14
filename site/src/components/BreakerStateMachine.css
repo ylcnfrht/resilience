@@ -1,0 +1,28 @@
+.rp-bsm-svg { width: 100%; height: auto; display: block; max-width: 640px; margin-inline: auto; }
+.rp-bsm-edge path { fill: none; stroke: var(--sl-color-gray-4); stroke-width: 1.5; }
+.rp-bsm-edge text { fill: var(--sl-color-gray-3); font-size: 12px; }
+.rp-bsm-head { fill: var(--sl-color-gray-4); }
+.rp-bsm-node rect {
+  fill: var(--sl-color-black);
+  stroke: color-mix(in srgb, var(--s) 45%, transparent);
+  stroke-width: 1.5;
+  transition: fill 0.3s ease, stroke 0.3s ease;
+}
+.rp-bsm-label { fill: var(--sl-color-gray-2); font-size: 16px; font-weight: 700; }
+.rp-bsm-sub { fill: var(--sl-color-gray-3); font-size: 11px; font-family: var(--sl-font-mono); }
+.rp-bsm-node[data-active] rect {
+  fill: color-mix(in srgb, var(--s) 22%, var(--sl-color-black));
+  stroke: var(--s);
+  stroke-width: 2.5;
+  animation: rp-bsm-pulse 1.6s ease-in-out infinite;
+}
+.rp-bsm-node[data-active] .rp-bsm-label { fill: var(--s); }
+@keyframes rp-bsm-pulse { 50% { stroke-width: 4; } }
+.rp-bsm-actions { margin: 0.75rem 0; }
+.rp-bsm-slider { margin-bottom: 0.75rem; }
+.rp-bsm-rule { font-size: 0.8rem; color: var(--d-muted); margin: 0.75rem 0 0; }
+.rp-bsm-log { font-size: 0.75rem; font-family: var(--sl-font-mono); color: var(--d-muted); margin: 0.5rem 0 0; padding-left: 1.2rem; }
+@media (prefers-reduced-motion: reduce) {
+  .rp-bsm-node rect { transition: none; }
+  .rp-bsm-node[data-active] rect { animation: none; }
+}

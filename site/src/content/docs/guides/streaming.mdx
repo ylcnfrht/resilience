@@ -1,0 +1,179 @@
+---
+title: Streaming responses
+description: Protect streaming calls (LLM tokens, file downloads, SSE) with executeStream - retries before the first chunk, and what timeouts mean after it.
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+**The problem.** `pipeline.execute()` waits for one value. A streaming call (LLM tokens, a large download, server-sent
+events) produces many, and a failure halfway through is different from a failure at the start:
+
+- **Before the first chunk**, nothing has reached the user. The call can be retried, hedged, timed out or replaced by a fallback like any other.
+- **After the first chunk**, the user has seen part of the answer. Retrying would send those chunks again; a fallback would
+  splice a second answer onto half of the first.
+
+`pipeline.executeStream(factory)` draws that line for you: the pipeline protects everything up to the first chunk, and from
+then on the stream is **committed** to the caller.
+
+## The basic call
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+declare function openCompletion(prompt: string, options: { signal: AbortSignal }): Promise<AsyncIterable<string>>;
+declare function render(token: string): void;
+// ---cut---
+const llm = new ResiliencePipelineBuilder({ name: 'llm' })
+  .addRetry({ maxRetryAttempts: 2, delay: '500ms', backoffType: 'exponential', useJitter: true })
+  .addCircuitBreaker({ failureRatio: 0.5, minimumThroughput: 10 })
+  .addTimeout('10s') // time to first token, per attempt
+  .build();
+
+for await (const token of llm.executeStream(({ signal }) => openCompletion('Summarize…', { signal }))) {
+  render(token);
+}
+```
+
+The factory returns an `AsyncIterable` or a `ReadableStream` (or a promise of one). `executeStream` returns an async
+generator you consume with `for await`. It accepts the same options as `execute` (`signal`, `operationKey`, `idempotent`…).
+
+## What each strategy covers
+
+The pipeline runs the factory **and reads the first chunk** inside `execute()`. That `execute()` returns as soon as the first
+chunk arrives, so every strategy sees the stream only up to that point:
+
+| Strategy | Before the first chunk | After the first chunk |
+|---|---|---|
+| Retry | Retries a failed connect or a stream that fails before yielding. A stream that throws before its first chunk is closed first. | Not retried. The error reaches your `for await`. |
+| Timeout | Time to first chunk. A slow first token is a `TimeoutRejectedError`. | Off: its timer was cleared when `execute()` returned. |
+| Circuit breaker | Counts connect failures and first-chunk timeouts. | Mid-stream errors are not counted. |
+| Fallback | Answers instead of the stream: a value is yielded as one chunk, a stream is iterated. | Never replaces a stream that already yielded. |
+| Cache | Not supported: a cached stream can only be read once, so the second hit throws a `TypeError`. | — |
+| Concurrency limiter, rate limiter | Hold a permit until the first chunk. | The permit is released: a long stream doesn't occupy a slot. |
+| Hedging | Starts a second stream if the first is slow to produce a chunk. | The first stream to yield wins. See the caution below. |
+
+Two consequences worth knowing:
+
+- **A limiter does not bound concurrent streams.** If you need "at most 20 open streams", count them yourself around the
+  `for await`, or wrap the whole loop in `execute()` with a [concurrency limiter](/strategies/concurrency-limiter/)
+  (then the pipeline protects the entire stream, but retries would repeat chunks, so put no retry in that pipeline).
+- **Fallbacks only cover the connect phase.** If the stream fails after its first chunk, the error reaches your loop;
+  switch sources there only if nothing was yielded yet (example below).
+
+## Timeouts for the whole stream
+
+The pipeline timeout only bounds the wait for the first chunk. For a limit on the whole stream, or on the gap between chunks,
+use the source's own signal:
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+declare function openCompletion(prompt: string, options: { signal: AbortSignal }): Promise<AsyncIterable<string>>;
+declare function render(token: string): void;
+declare const llm: import('resilience-pipeline').ResiliencePipeline;
+// ---cut---
+const total = AbortSignal.timeout(60_000); // the whole answer, including retries before the first token
+
+const stream = llm.executeStream(
+  ({ signal }) => openCompletion('Summarize…', { signal: AbortSignal.any([signal, total]) }),
+  { signal: total },
+);
+for await (const token of stream) render(token);
+```
+
+`AbortSignal.any([signal, total])` reaches the source both before the first chunk (the pipeline's own timeouts and
+retries abort `signal`) and after it (`total` still runs). For an idle timeout between chunks, reset a timer per chunk in
+your loop and `break` when it fires.
+
+<Aside type="caution" title="After the first chunk, the pipeline's signal no longer follows yours">
+Strategies that create their own signal (timeout, hedging) disconnect it from the caller's `signal` when `execute()`
+returns, which for a stream is right after the first chunk. Aborting the `signal` you passed in `options` later does
+**not** reach the source then. Two ways to stop a committed stream:
+
+- **`break` out of the `for await`** (or call `return()` on the generator). That closes the source: `return()` on an async
+  iterator, `cancel()` on a `ReadableStream`. This always works.
+- **Give the source your own signal directly**, combined with the pipeline's, as in `AbortSignal.any([signal, total])` above.
+</Aside>
+
+## Falling back to another source
+
+```ts twoslash
+declare function openPrimary(prompt: string, signal: AbortSignal): Promise<AsyncIterable<string>>;
+declare function openBackup(prompt: string, signal: AbortSignal): Promise<AsyncIterable<string>>;
+declare const llm: import('resilience-pipeline').ResiliencePipeline;
+declare const backup: import('resilience-pipeline').ResiliencePipeline;
+// ---cut---
+async function* answer(prompt: string): AsyncGenerator<string> {
+  let yielded = false;
+  try {
+    for await (const t of llm.executeStream(({ signal }) => openPrimary(prompt, signal))) {
+      yielded = true;
+      yield t;
+    }
+  } catch (e) {
+    // Mid-stream failure: the user already has part of the answer. Surface it, don't splice another one on.
+    if (yielded) throw e;
+    // Nothing delivered yet (open circuit, timeout to first token, retries exhausted): switch providers.
+    yield* backup.executeStream(({ signal }) => openBackup(prompt, signal));
+  }
+}
+```
+
+## Fetch and ReadableStream
+
+`executeStream` reads a `ReadableStream` with its reader when the stream isn't async-iterable, so a `fetch` body works
+directly. Check the status inside the factory, so a 503 counts as a failure before the first chunk and is retried:
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+declare const llm: import('resilience-pipeline').ResiliencePipeline;
+declare function write(bytes: Uint8Array): void;
+// ---cut---
+const download = llm.executeStream(async ({ signal }) => {
+  const res = await fetch('https://files.example.com/export.csv', { signal });
+  if (!res.ok || !res.body) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
+  return res.body;
+});
+for await (const bytes of download) write(bytes);
+```
+
+The thrown error carries `status`, so the default retry predicate skips 4xx answers and retries 5xx, 408 and 429.
+
+## Hedging and streams
+
+Hedging starts a second stream when the first is slow to yield, and the first one to produce a chunk wins. The losers'
+signals are aborted.
+
+<Aside type="tip" title="Pass the signal to the source">
+Each attempt keeps its own stream: a losing hedged attempt (or a timed-out one) that produces its first chunk late is
+closed and discarded, never mixed into the winner's output. Still pass `signal` to the source (`fetch`, SDK clients that
+accept `{ signal }`), so a loser stops working as soon as it lost instead of running until its first chunk.
+</Aside>
+
+## Non-idempotent streams
+
+A streaming call that changes state (starts a job, charges credits per request) must not run twice. Pass `idempotent: false`:
+retries and hedging then only repeat attempts that never started (rejected by a limiter or an open circuit).
+
+```ts
+llm.executeStream(({ signal }) => startExport(jobSpec, signal), { idempotent: false });
+```
+
+<Aside type="caution" title="abortOnReturn ends the stream">
+`abortOnReturn: true` aborts each attempt's signal as soon as its callback settles. For `executeStream` that is the moment
+the first chunk arrives, so a source that honours the signal stops after one chunk. Don't use it with streams.
+</Aside>
+
+## Checklist
+
+- Pass the pipeline's `signal` to the source; combine it with your own signal for limits beyond the first chunk.
+- The pipeline timeout is time to first chunk. Bound the whole stream yourself.
+- Stop a committed stream with `break`, not by aborting the signal you passed in options.
+- Fall back only when nothing was yielded; mid-stream errors go to the consumer.
+- Hedge only sources that stop when aborted.
+
+## Related
+
+- [Context, signals and deadline propagation](/concepts/context-and-signals/)
+- [Retry](/strategies/retry/), [Timeout](/strategies/timeout/), [Hedging](/strategies/hedging/)
+- [What counts as a failure](/concepts/failures/)

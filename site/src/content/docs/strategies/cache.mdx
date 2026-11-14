@@ -1,0 +1,186 @@
+---
+title: Cache and coalesce
+description: Cache successful results by key, merge concurrent identical calls into one (single-flight), and serve a stale value when the dependency fails.
+sidebar:
+  order: 9
+---
+import CacheTimeline from '../../../components/CacheTimeline.tsx';
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+Three related tools built on one strategy:
+
+| Tool | Stores results | Merges concurrent calls | Serves old data on failure |
+|---|---|---|---|
+| `addCache({ ttl })` | yes, for `ttl` | yes (default) | with `staleTtl` |
+| `addCoalesce()` | no | yes | no |
+| `addStaleFallback({ maxAge })` | only as a backup | no | yes, up to `maxAge` |
+
+Use **cache** when the same data is read far more often than it changes. Use **coalesce** (single-flight) when many callers ask for the same thing at the same moment, a cache stampede after a deploy or a cold key, but every answer must be fresh. Use **stale fallback** when every call must go through, yet an old answer beats an error. Don't cache writes, or per-user data under a shared key.
+
+<Tabs syncKey="builder">
+<TabItem label="ResiliencePipelineBuilder">
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+interface Rates { eur: number; usd: number }
+declare function fetchRates(signal: AbortSignal): Promise<Rates>;
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder<Rates>()
+  .addCache({ key: () => 'fx-rates', ttl: '1m', staleTtl: '1h' })
+  .addTimeout('2s')
+  .build();
+
+const rates = await pipeline.execute(({ signal }) => fetchRates(signal));
+```
+</TabItem>
+<TabItem label="PipelineBuilder">
+```ts twoslash
+import { PipelineBuilder, cacheStrategy, timeoutStrategy } from 'resilience-pipeline';
+interface Rates { eur: number; usd: number }
+// ---cut---
+const pipeline = new PipelineBuilder<Rates>()
+  .add(cacheStrategy({ key: () => 'fx-rates', ttl: '1m', staleTtl: '1h' }))
+  .add(timeoutStrategy('2s'))
+  .build();
+```
+</TabItem>
+</Tabs>
+
+Fresh for a minute; for the next hour, served only if a refresh fails.
+
+## How it works
+
+<CacheTimeline client:visible />
+
+For each execution:
+
+1. **Key.** `key(context)`, by default `context.operationKey`. An `undefined` key skips the cache entirely.
+2. **Fresh hit** (`age < ttl`): return the stored value. The callback doesn't run. `OnCacheHit`.
+3. **Too old** (`age ≥ ttl + staleTtl`): delete the entry.
+4. **Miss**: `OnCacheMiss`, then call through. Concurrent misses for the same key share one call (`OnCoalesced`).
+5. **Success**: store it if `shouldCache` agrees (and `ttl + staleTtl > 0`). Failures are never stored.
+6. **Failure** with an entry still in its stale window, and `shouldServeStale` agrees: return the stale value instead. `OnStaleServed`.
+
+The store is read on every call and may be remote. A store that throws never fails the call: a failed `get` counts as a miss, a failed `set` or `delete` is skipped, and each is reported as `OnCacheStoreFailed`.
+
+<Aside type="caution" title="Set a key">
+The default key is `context.operationKey`. If you never pass `operationKey` to `execute()`, nothing is cached. Give `key` explicitly, or pass ``{ operationKey: `user:${id}` }`` per call.
+</Aside>
+
+## Coalescing (single-flight)
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+interface User { id: string; name: string }
+declare function loadUser(id: string, signal: AbortSignal): Promise<User>;
+// ---cut---
+const users = new ResiliencePipelineBuilder<User>().addCoalesce().build();
+
+// 100 concurrent requests for user 42: one database query, 100 answers.
+const getUser = (id: string) => users.execute(({ signal }) => loadUser(id, signal), { operationKey: `user:${id}` });
+await Promise.all(Array.from({ length: 100 }, () => getUser('42')));
+```
+
+`addCoalesce(options)` is `addCache` with `ttl: 0`: nothing is kept after the call ends. Every caller gets the same outcome, success or failure.
+
+**Abort semantics.** The shared call runs on its own `AbortSignal`, not the first caller's, so one caller giving up can't cancel it for the others.
+
+- A caller whose signal aborts leaves at once and fails with its abort reason. The shared call keeps running for the rest.
+- When the **last** caller leaves, the shared call is aborted and detached; the next caller starts a fresh one instead of joining a dying call.
+- The shared call otherwise sees the first caller's context (`properties`, `operationKey`).
+
+Put timeouts and retries **inside** (after) the cache, so they apply to the shared call. A timeout outside it only lets that one caller stop waiting.
+
+## Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `ttl` | `Duration` | required | How long a value is served without calling. `0` with `coalesce` gives deduplication without caching. ≥ 0. |
+| `key` | `(context) => string \| undefined` | `context.operationKey` | Cache key; `undefined` bypasses the cache (no caching, no coalescing). |
+| `staleTtl` | `Duration` | `0` | Stale-if-error window after `ttl`: when the call fails, a value younger than `ttl + staleTtl` is returned instead. |
+| `shouldServeStale` | `(args: { outcome, context }) => boolean \| Promise<boolean>`, or a `PredicateBuilder` | every failure except aborts and client errors (4xx other than 408 / 429) | Which failures a stale value may hide. |
+| `shouldCache` | `(args: { outcome, context }) => boolean \| Promise<boolean>` | every success | Which successful results to store. Failures are never stored. |
+| `store` | `CacheStore` | a new `MemoryCacheStore` per strategy | Where entries live. Share one store to share the cache between pipelines. |
+| `coalesce` | `boolean` | `true` | Concurrent misses for the same key share one call. |
+| `onCacheHit` | `(args: { context, key, value, age }) => void \| Promise<void>` | – | Fresh hit. `age` in ms. |
+| `onCacheMiss` | `(args: { context, key }) => void \| Promise<void>` | – | Miss (also when a stale value exists). |
+| `onStaleServed` | `(args: { context, key, value, age, outcome }) => void \| Promise<void>` | – | A stale value replaced the failure in `outcome`. |
+| `name` | `string` | `'Cache'` (`'Coalesce'` for `addCoalesce`) | Strategy name. |
+
+`addCoalesce` takes the same options minus `ttl`, `staleTtl`, `store` and `shouldCache`.
+
+### Stale fallback
+
+`addStaleFallback` / `staleFallbackStrategy` remembers the last good value per key and returns it only when a call fails. Fresh calls always go through. It is the cache strategy with `ttl: 0`, `staleTtl: maxAge` and `coalesce: false`; see [fallback](/strategies/fallback/) for how it fits with other fallbacks.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `maxAge` | `Duration` | required | How old a last-good value may be and still be served. |
+| `maxEntries` | `number` | `1000` | Keys remembered (LRU). Ignored when `store` is set. |
+| `store` | `CacheStore` | `new MemoryCacheStore({ maxEntries })` | Where values live. |
+| `key`, `shouldServeStale`, `onStaleServed`, `name` | | as above; `name` defaults to `'StaleFallback'` | |
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+declare function fetchPrices(signal: AbortSignal): Promise<Record<string, number>>;
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder()
+  .addStaleFallback({ key: () => 'prices', maxAge: '6h' })
+  .addRetry({ maxRetryAttempts: 2 })
+  .addTimeout('3s')
+  .build();
+```
+
+## Stores
+
+`MemoryCacheStore` is the default: an in-process `Map` bounded by `maxEntries` (default `1000`), evicting the least recently used entry. It ignores the TTL hint; the strategy deletes expired entries when it reads them and LRU bounds the rest. It also has `size` and `clear()`.
+
+```ts twoslash
+import { MemoryCacheStore, ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const store = new MemoryCacheStore({ maxEntries: 10_000 });
+const a = new ResiliencePipelineBuilder().addCache({ ttl: '5m', store }).build();
+const b = new ResiliencePipelineBuilder().addCache({ ttl: '5m', store }).build(); // same entries as `a`
+
+store.clear(); // e.g. after a deploy
+```
+
+Implement `CacheStore` to use anything else. Methods may be sync or async:
+
+```ts twoslash
+import type { CacheEntry, CacheStore } from 'resilience-pipeline';
+// ---cut---
+interface MyCacheStore extends CacheStore {
+  get(key: string): Promise<CacheEntry | undefined>;
+  /** ttlMs = ttl + staleTtl: how long the entry can still be useful. Remote stores can expire it natively. */
+  set(key: string, entry: CacheEntry, ttlMs: number): Promise<void>;
+  delete(key: string): Promise<void>;
+}
+// CacheEntry = { value: unknown; storedAt: number } (epoch ms from the pipeline's clock)
+```
+
+The strategy decides freshness from `storedAt`, so a store only has to keep entries. `RedisCacheStore` ([Redis](/integrations/redis/)) is ready-made. Values must survive the store's serialization (JSON for Redis).
+
+## Events and errors
+
+| Telemetry event | Callback | Args |
+|---|---|---|
+| `OnCacheHit` | `onCacheHit` | `{ context, key, value, age }` |
+| `OnCacheMiss` | `onCacheMiss` | `{ context, key }` |
+| `OnStaleServed` | `onStaleServed` | `{ context, key, value, age, outcome }` |
+| `OnCoalesced` | – | `{ context, key, waiters }`: a caller joined an in-flight call; `waiters` includes it. |
+| `OnCacheStoreFailed` | – | `{ context, key, operation: 'get' \| 'set' \| 'delete', error }` |
+
+The strategy raises no errors of its own. A coalesced caller that aborts fails with its signal's reason.
+
+## Pitfalls
+
+- **Shared keys across types.** Entries are untyped. Two pipelines sharing a store must not use the same key for different shapes.
+- **Mutable values.** The memory store returns the same object to every hit. Don't mutate cached results.
+- **Per-user data.** Include the user or tenant in the key: ``key: (ctx) => `profile:${ctx.properties.get('userId')}` ``.
+
+## Related
+
+- [Fallback](/strategies/fallback/): `addStaleFallback` alongside fixed and computed fallbacks.
+- [Batcher](/strategies/batcher/): merge *different* keys into one call.
+- [Redis](/integrations/redis/): `RedisCacheStore`.

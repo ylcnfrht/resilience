@@ -1,0 +1,228 @@
+---
+title: From p-retry
+description: Replace pRetry() and makeRetriable() with retry() or a pipeline, map every option, and note where the defaults and callback order differ.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+**Who this is for:** code that calls `pRetry()` and now also needs a timeout per attempt, a circuit breaker, typed errors, or a fake clock in tests.
+
+For a one-off retry, `retry()` from `resilience-pipeline` is the direct replacement: a function and an options object, no pipeline to build. It only bundles the retry strategy (4.1 KB min+gzip against p-retry's 1.8 KB). When you need more than retries, build a pipeline and pass the same options to `addRetry()`.
+
+## Option mapping
+
+| p-retry 9 | resilience-pipeline |
+|---|---|
+| `pRetry(input, options)` | `retry(fn, options)` |
+| `retries` (default 10) | `maxRetryAttempts` (default 3). Both count retries, not attempts |
+| `minTimeout` (default 1000) | `delay` (default 2000) |
+| `factor` (default 2) | `factor` (default 2), with `backoffType: 'exponential'` |
+| exponential by default | `backoffType: 'exponential'` (default `'constant'`) |
+| `maxTimeout` | `maxDelay` |
+| `randomize: true` (× 1 to 2) | `useJitter: true`, `'full'` or `'equal'` (see differences) |
+| `maxRetryTime` | `maxRetryTime` |
+| `shouldRetry(context)` | `shouldHandle({ outcome, context, attemptNumber })` |
+| `shouldConsumeRetry(context)` | `shouldConsumeRetry(args)` |
+| `onFailedAttempt(context)` | `onFailedAttempt(args)`, or `onRetry(args)` before each delay |
+| `signal` | `signal` |
+| `unref: true` | `timeProvider: unrefSystemTime` (for a pipeline: builder option `unrefTimers: true`) |
+| `throw new AbortError(error)` | `throw new NonRetryableError(error)` |
+| `makeRetriable(fn, options)` | `pipeline.wrap(fn)` |
+| `input(attemptNumber)`, from 1 | `fn(context)`, `context.attemptNumber` from 0 |
+| context `error` | `args.outcome.error` (when `!args.outcome.ok`) |
+| context `attemptNumber`, from 1 | `args.attemptNumber`, from 0 |
+| context `retriesLeft` | `args.retriesLeft` (in `onFailedAttempt`) |
+| context `retryDelay` | `args.retryDelay` (in `onRetry`) |
+| fake timers for tests | `timeProvider: new FakeTimeProvider()` from `resilience-pipeline/testing` |
+
+## Side by side
+
+### Basic retry with an early stop
+
+<Tabs syncKey="p-retry">
+<TabItem label="p-retry">
+
+```ts
+import pRetry, { AbortError } from 'p-retry';
+
+const blob = await pRetry(
+  async () => {
+    const response = await fetch(url);
+    if (response.status === 404) throw new AbortError(response.statusText);
+    if (!response.ok) throw new Error(response.statusText);
+    return response.blob();
+  },
+  { retries: 5 },
+);
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+declare const url: string;
+// ---cut---
+import { NonRetryableError, retry } from 'resilience-pipeline';
+
+const blob = await retry(
+  async ({ signal }) => {
+    const response = await fetch(url, { signal });
+    if (response.status === 404) throw new NonRetryableError(response.statusText);
+    if (!response.ok) throw new Error(response.statusText);
+    return response.blob();
+  },
+  { maxRetryAttempts: 5, backoffType: 'exponential', delay: 1000 },
+);
+```
+
+</TabItem>
+</Tabs>
+
+`backoffType: 'exponential', delay: 1000` gives p-retry's default delays (1 s, 2 s, 4 s…). Like `AbortError`, `NonRetryableError` stops at once and the caller receives the wrapped error, not the wrapper.
+
+### Filtering and logging
+
+<Tabs syncKey="p-retry">
+<TabItem label="p-retry">
+
+```ts
+const result = await pRetry(run, {
+  retries: 4,
+  shouldRetry: ({ error }) => !(error instanceof ValidationError),
+  onFailedAttempt: ({ error, attemptNumber, retriesLeft }) => {
+    log.warn(`Attempt ${attemptNumber} failed: ${error.message}. ${retriesLeft} left.`);
+  },
+});
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+class ValidationError extends Error {}
+declare function run(): Promise<string>;
+declare const log: { warn(msg: string): void };
+// ---cut---
+import { retry } from 'resilience-pipeline';
+
+const result = await retry(run, {
+  maxRetryAttempts: 4,
+  backoffType: 'exponential',
+  delay: 1000,
+  shouldHandle: ({ outcome }) => !outcome.ok && !(outcome.error instanceof ValidationError),
+  onFailedAttempt: ({ outcome, attemptNumber, retriesLeft }) => {
+    if (!outcome.ok) log.warn(`Attempt ${attemptNumber + 1} failed: ${String(outcome.error)}. ${retriesLeft} left.`);
+  },
+});
+```
+
+</TabItem>
+</Tabs>
+
+`shouldHandle` also sees successful outcomes, so check `outcome.ok` first. Returning `true` for a success retries it, which is how you retry on a result (for example a `Response` with status 503).
+
+### Wrapping a function
+
+<Tabs syncKey="p-retry">
+<TabItem label="p-retry">
+
+```ts
+import { makeRetriable } from 'p-retry';
+
+const fetchWithRetry = makeRetriable(fetch, { retries: 5 });
+const response = await fetchWithRetry('https://example.com');
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addRetry({ maxRetryAttempts: 5, backoffType: 'exponential', delay: 1000 })
+  .build();
+const fetchWithRetry = pipeline.wrap(fetch);
+const response = await fetchWithRetry('https://example.com');
+```
+
+</TabItem>
+</Tabs>
+
+For HTTP, [`createResilientFetch()`](/integrations/fetch/) is usually the better replacement: it retries 5xx and 429 responses (fetch resolves them, so neither p-retry nor `wrap(fetch)` sees them as failures), honours `Retry-After`, and only retries idempotent methods.
+
+### Adding a timeout per attempt
+
+p-retry has no timeout. With a pipeline, put the timeout after the retry so each attempt gets its own budget:
+
+```ts twoslash
+declare function run(signal: AbortSignal): Promise<string>;
+// ---cut---
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addRetry({ maxRetryAttempts: 5, backoffType: 'exponential', delay: 1000, maxRetryTime: '30s' })
+  .addTimeout('2s')
+  .build();
+
+const result = await pipeline.execute(({ signal }) => run(signal));
+```
+
+### Tests without waiting
+
+<Tabs syncKey="p-retry">
+<TabItem label="p-retry">
+
+```ts
+import { mock } from 'node:test';
+
+mock.timers.enable({ apis: ['setTimeout'] });
+const promise = pRetry(run, { retries: 3 });
+mock.timers.tick(10_000);
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+declare function run(): Promise<string>;
+// ---cut---
+import { retry } from 'resilience-pipeline';
+import { FakeTimeProvider } from 'resilience-pipeline/testing';
+
+const time = new FakeTimeProvider();
+const promise = retry(run, { maxRetryAttempts: 3, timeProvider: time });
+await time.runAll(); // every retry delay, instantly
+```
+
+</TabItem>
+</Tabs>
+
+`maxRetryTime` uses the same clock, so it is reached on fake time too.
+
+## Behavioural differences to watch
+
+<Aside type="caution" title="What gets retried by default">
+p-retry retries every error except `AbortError` and non-network `TypeError`s. Without `shouldHandle`, we skip 4xx client errors (an error with `status`, `statusCode` or `response.status` from 400 to 499, except 408 and 429), caller aborts and rejections from other strategies, and we never retry an open circuit. To retry everything, pass `shouldHandle: ({ outcome }) => !outcome.ok`.
+</Aside>
+
+- **Defaults.** p-retry: 10 retries, exponential from 1 s. Ours (Polly's): 3 retries, a constant 2 s. Set `maxRetryAttempts`, `backoffType` and `delay` explicitly.
+- **Jitter.** p-retry's `randomize` multiplies each delay by 1 to 2, so delays only get longer. Our `useJitter: true` is decorrelated jitter for exponential backoff, `'full'` picks between 0 and the delay, `'equal'` between half and the full delay. None matches `randomize` exactly; `'full'` spreads a fleet of clients best.
+- **Attempt numbers are 0-based.** p-retry's first attempt is `attemptNumber` 1; our `context.attemptNumber` and `args.attemptNumber` are 0 on the first call.
+- **Callback order.** p-retry calls `shouldConsumeRetry`, then `onFailedAttempt`, then `shouldRetry`, and `onFailedAttempt` runs for every failure. We call `shouldHandle` first; `shouldConsumeRetry` and `onFailedAttempt` only run for failures it accepts.
+- **Uncounted retries still wait.** When p-retry's `shouldConsumeRetry` returns `false`, it retries at once. Ours retries after the normal delay.
+- **`maxRetryTime`.** p-retry shortens the last delay to fit the remaining time. We stop when the next delay would end past `maxRetryTime`. Neither interrupts an attempt in flight; add a timeout for that.
+- **Errors in callbacks.** Same in both: a callback that throws ends the call with that error, without further retries.
+- **Abort.** Both stop retrying when the signal aborts, and neither calls your function if it is already aborted. p-retry always rejects with the abort reason. Ours rejects with the reason when the abort lands during a delay, and with the attempt's own error when it lands during an attempt. Ours also passes the signal to your function through `context.signal`, so the attempt itself can be cancelled.
+- **Non-idempotent calls.** `execute(fn, { idempotent: false })` only repeats calls that never started (a rejection by another strategy). p-retry has no equivalent.
+
+## What you gain
+
+- Timeout, circuit breaker, fallback, hedging and rate limiting in the same pipeline, in the order you choose.
+- `Retry-After` honoured from errors that carry `retryAfter`, a shared [retry budget](/strategies/retry/) against retry storms, and a `delayGenerator` for anything else.
+- Typed errors with `settle()`, telemetry events, OpenTelemetry and Prometheus export.
+- CommonJS as well as ESM, and Node 20.
+
+Related: [Retry](/strategies/retry/), [Timeout](/strategies/timeout/), [fetch](/integrations/fetch/), [Testing](/guides/testing/).

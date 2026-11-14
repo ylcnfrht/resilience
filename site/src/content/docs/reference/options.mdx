@@ -1,0 +1,218 @@
+---
+title: Options cheat sheet
+description: Every builder method and strategy factory with its key options and defaults, in compact tables. Follow the links for the full pages.
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every `addX()` on `ResiliencePipelineBuilder` has an `xStrategy()` factory for `PipelineBuilder` with the same options. Durations accept milliseconds or strings: `'250ms'`, `'30s'`, `'5m'`, `'1h'`, `'1d'`, `'2w'`. Every strategy also accepts `name` (for telemetry and `getStrategy()`).
+
+Defaults that match Polly v8 are marked *(Polly)*.
+
+## Builders and execution
+
+| API | Key options | Defaults |
+|---|---|---|
+| `new ResiliencePipelineBuilder<T>(o)` / `new PipelineBuilder<T>(o)` | `name`, `timeProvider`, `unrefTimers`, `tags`, `instrumentation` (or `false`), `telemetry` | system clock, timers keep the process alive, telemetry on |
+| `pipeline.execute(fn, o)` / `executeOutcome` / `settle` / `executeStream` / `wrap` | `signal`, `operationKey`, `properties`, `idempotent`, `abortOnReturn`, `name`, `attributes`, `timeProvider` | `idempotent: true`, `abortOnReturn: false` |
+| `retry(fn, o)` | retry options + `signal`, `timeProvider` | as `addRetry` |
+| `withTimeout(fn, timeout, o)` | timeout duration or options; `signal`, `timeProvider` | none |
+| `new ResiliencePipelineRegistry(o)` | `timeProvider`, `pipelineName(key)` | name = `String(key)` |
+
+## Retry: `addRetry` / `retryStrategy`
+
+Full page: [Retry](/strategies/retry/).
+
+| Option | Default |
+|---|---|
+| `maxRetryAttempts` | `3` *(Polly)*; `Infinity` retries until aborted |
+| `delay` | `2000` ms *(Polly)* |
+| `backoffType` | `'constant'` *(Polly)*; also `'linear'`, `'exponential'` |
+| `factor` | `2` (exponential growth; ignored by `useJitter: true`, whose decorrelated jitter grows ~×2) |
+| `useJitter` | `false`; `true` (Polly's), `'full'`, `'equal'` |
+| `maxDelay` | none |
+| `delayGenerator` | none; `undefined` or negative → computed delay |
+| `respectRetryAfter` | `true` (waits at least an error's `retryAfter`) |
+| `initialDelay` | `0` |
+| `maxRetryTime` | none |
+| `shouldHandle` | transient errors: not 4xx (except 408/429), not aborts, not rejections. An open circuit is never retried |
+| `shouldConsumeRetry` | every handled failure consumes a retry |
+| `budget` | none (`new RetryBudget({ ratio: 0.2, minRetriesPerSecond: 10, window: '10s' })`) |
+| `randomizer` | `Math.random` |
+| Callbacks | `onRetry`, `onFailedAttempt`, `onRetryExhausted`, `onBudgetExhausted` |
+
+## Timeout: `addTimeout` / `timeoutStrategy`
+
+Full page: [Timeout](/strategies/timeout/). Accepts a duration or options.
+
+| Option | Default |
+|---|---|
+| `timeout` | `30s` *(Polly)*; `Infinity` disables it |
+| `timeoutGenerator` | none |
+| `cooperative` | `false`: return at once. `true`: wait for the callback (Polly's behaviour) |
+| `keepLateResult` | `false` (with `cooperative`) |
+| Callbacks | `onTimeout` |
+
+## Circuit breaker: `addCircuitBreaker` / `circuitBreakerStrategy`
+
+Full page: [Circuit breaker](/strategies/circuit-breaker/).
+
+| Option | Default |
+|---|---|
+| `failureRatio` | `0.1` *(Polly)* |
+| `minimumThroughput` | `100` *(Polly)* |
+| `samplingDuration` | `30s` *(Polly)* (time window) |
+| `samplingCount` | none; set it for a count window of the last N calls |
+| `consecutiveFailures` | none; alone, it replaces the ratio rule |
+| `minimumRps` | none (time window only) |
+| `breakDuration` | `5s` *(Polly)* |
+| `breakDurationGenerator` | none |
+| `halfOpenMaxCalls` | `1` |
+| `halfOpenSuccessThreshold` | none: close unless probe failures reach `failureRatio` |
+| `halfOpenMaxWait` | `30s` |
+| `warmUpDuration` | `0` |
+| `breaker` | built-in ratio/window rules; pass a `CircuitBreakerPolicy` to replace them |
+| `manualControl`, `stateProvider`, `initialState` | none |
+| `extensions` | none; `circuitHealthCheck({ check, interval, timeout = interval })`, `sharedCircuitState({ store, key, syncInterval = '5s' })` |
+| `shouldHandle` | transient errors; unhandled errors are ignored, not counted as successes; rejections never count |
+| Callbacks | `onOpened`, `onClosed`, `onHalfOpened`, `onRejected` |
+
+## Fallback family
+
+Full page: [Fallback](/strategies/fallback/).
+
+| API | Key options | Defaults |
+|---|---|---|
+| `addFallback(o)` / `fallbackStrategy` | `fallbackAction` or `fallbackValue` (one is required), `shouldHandle`, `onFallback` | handles every failure except aborts and 4xx, so it also covers open circuits and full limiters |
+| `addFallbackOn(codes, action, o?)` / `fallbackOnStrategy` | error `code`s to handle | only those codes |
+| `addMapError(mapper)` / `mapErrorStrategy` | `(error, context) => yourError` | every failure except caller aborts |
+| `addStaleFallback(o)` / `staleFallbackStrategy` | `maxAge` (required), `key`, `maxEntries`, `store`, `shouldServeStale`, `onStaleServed` | `key` = `context.operationKey`, `maxEntries: 1000` |
+
+## Hedging: `addHedging` / `hedgingStrategy`
+
+Full page: [Hedging](/strategies/hedging/).
+
+| Option | Default |
+|---|---|
+| `maxHedgedAttempts` | `1` *(Polly)* |
+| `delay` | `2000` ms *(Polly)*; `0` = all at once, negative = only after a failure |
+| `delayGenerator`, `actionGenerator` | none |
+| `shouldHandle` | transient errors |
+| Callbacks | `onHedging` |
+
+## Concurrency limiting
+
+Full pages: [Concurrency limiter](/strategies/concurrency-limiter/), [Adaptive concurrency](/strategies/adaptive-concurrency/).
+
+| API | Option | Default |
+|---|---|---|
+| `addConcurrencyLimiter(permits, queue?)` or `(o)` | `permitLimit` | required |
+| | `queueLimit` | `0` *(Polly)* |
+| | `queueTimeout` | none |
+| | `priority(ctx)` | `0` for everyone (lower runs sooner) |
+| | `overflow` | `'reject-new'`; `'drop-oldest'`, `'drop-lowest-priority'` |
+| `addAdaptiveConcurrencyLimiter(o)` | `algorithm` | `'gradient2'`; `'vegas'`, `'aimd'` or your own |
+| | `initialLimit` / `minLimit` / `maxLimit` | `20` / `1` / `1000` |
+| | `queueLimit` / `queueTimeout` | `0` / none |
+| | `shouldDrop` | timeouts, rejections, transient errors |
+
+## Rate limiting
+
+Full page: [Rate limiting](/strategies/rate-limiting/).
+
+| API | Required | Defaults |
+|---|---|---|
+| `addRateLimiter(o)` / `tokenBucketStrategy` | `tokenLimit`, `replenishmentPeriod` | `tokensPerPeriod` = `tokenLimit` |
+| `addFixedWindowRateLimiter(o)` | `permitLimit`, `window` | `alignment: 'fixed'` |
+| `addSlidingWindowRateLimiter(o)` | `permitLimit`, `window` | `segmentsPerWindow: 10` |
+| `addPartitionedRateLimiter(o)` | `partitionKey(ctx)`, `limiter(key, source)` | `idleTimeout: '10m'`, `maxPartitions` unlimited |
+
+Shared by the token bucket and window limiters:
+
+| Option | Default |
+|---|---|
+| `permits(ctx)` | `1` |
+| `queueTimeout` | `0`: reject at once (waiters are served in arrival order) |
+| `queueLimit` | unlimited (with `queueTimeout`) |
+| `blockDuration` | `0` |
+| `allow(ctx)` / `deny(ctx)` | none |
+| `control` | none (`RateLimiterControl`: `penalty`, `reward`, `block`, `unblock`, `delete`) |
+| `insurance` | none (`{ algorithm, timeout? }`) |
+| `spacing` / `minTime` | none / `0` |
+| Callbacks | `onRejected` |
+
+## Cache, coalesce, lock
+
+Full pages: [Cache](/strategies/cache/), [Lock](/strategies/lock/).
+
+| API | Option | Default |
+|---|---|---|
+| `addCache(o)` | `ttl` | required |
+| | `key(ctx)` | `context.operationKey`; `undefined` bypasses the cache |
+| | `store` | a new `MemoryCacheStore` (`maxEntries: 1000`) per strategy |
+| | `staleTtl` | `0` |
+| | `coalesce` | `true` |
+| | `shouldCache` | successes only |
+| | `shouldServeStale` | every failure except aborts and 4xx |
+| | Callbacks | `onCacheHit`, `onCacheMiss`, `onStaleServed` |
+| `addCoalesce(o)` | `key(ctx)` | `context.operationKey` |
+| `addLock(o)` | `key(ctx)` | required |
+| | `ttl` | `30s` (renewed every ttl/3) |
+| | `wait` | `0`: fail fast |
+| | `store` | one in-memory store shared by the process |
+| | Callbacks | `onLockLost` |
+
+## Chaos
+
+Full page: [Chaos](/strategies/chaos/).
+
+| API | Options | Defaults |
+|---|---|---|
+| Every `addChaosX` | `enabled` / `enabledGenerator`, `injectionRate` / `injectionRateGenerator`, `randomizer` | `enabled: true`, `injectionRate: 0.001` *(Polly)* |
+| `addChaosFault` | `fault` / `faultGenerator`, `onFaultInjected` | none |
+| `addChaosOutcome` | `outcome` / `outcomeGenerator`, `onOutcomeInjected` | none |
+| `addChaosLatency` | `latency` / `latencyGenerator`, `onLatencyInjected` | `latency: 30s` *(Polly)* |
+| `addChaosBehavior` | `behavior` (required), `onBehaviorInjected` | none |
+| `setGlobalChaos(o)` | `injectionRate`, `filter`, `fault`, `latency`, `randomizer` | `injectionRate: 0.05` |
+
+## Batches and batching
+
+Full pages: [Batches](/strategies/batches/), [Batcher](/strategies/batcher/).
+
+| API | Options | Defaults |
+|---|---|---|
+| `all(tasks, o)` / `allSettled(tasks, o)` | `pipeline`, `signal` | none |
+| `map(items, fn, o)` | `concurrency`, `stopOnError`, `pipeline`, `signal` | all at once, `stopOnError: true` |
+| `waitFor(check, o)` | `interval` (fixed or per poll), `timeout` (both required), `signal`, `timeProvider` | none |
+| `createBatcher(o)` | `maxSize`, `maxWait`, `run` (required), `key`, `pipeline`, `timeProvider` | none |
+
+## HTTP clients: `/fetch` and `/axios`
+
+Full pages: [fetch](/integrations/fetch/), [axios](/integrations/axios/).
+
+| Option | Default |
+|---|---|
+| `totalTimeout` | `30s` |
+| `attemptTimeout` | `10s` |
+| `retry` | 3 retries, exponential from 200 ms, full jitter, `Retry-After` honoured; `false` disables |
+| `retryOn` | network errors, timeouts, 408/429/500/502/503/504 |
+| `circuitBreaker` | 50% failures over the last 20 calls (at least 10), 10 s break, one per host; `false` disables |
+| `concurrency` | no limit |
+| `pipelineKey(url)` | `url.origin` |
+| `maxPipelines` | `100` |
+| `retryUnsafeMethods` | `false`: POST/PATCH are retried only with an `Idempotency-Key` header |
+
+Per request: `{ resilience: { retries, retryOn, timeout, attemptTimeout, idempotent } }`.
+
+## Observability
+
+| API | Options | Defaults |
+|---|---|---|
+| `createStats(o)` | `pipeline`, `window`, `percentiles`, `timeProvider` | every pipeline, `10s`, `[0.5, 0.9, 0.99]` |
+| `new RetryBudget(o)` | `ratio`, `minRetriesPerSecond`, `window` | `0.2`, `10`, `10s` |
+
+<Aside type="note">
+Options are validated on `build()`. Out-of-range values (`maxRetryAttempts < 0`, `injectionRate > 1`, a zero timeout) throw a `RangeError` there, not on the first call.
+</Aside>

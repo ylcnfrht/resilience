@@ -1,0 +1,209 @@
+---
+title: Running several instances
+description: Share circuit state, rate limits, locks and caches across instances through Redis, and know which state stays per process.
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+**The problem.** Every strategy keeps its state in the process that runs it. Scale a service to ten instances behind a
+load balancer and you get:
+
+- **Ten circuit breakers.** A dependency goes down. Each instance needs its own run of failures before its circuit opens,
+  so the dead dependency takes ten times the failed calls, and users hit ten times the errors.
+- **Ten rate limits.** A partner API allows 100 calls a minute. Each instance enforces 100 a minute, so the fleet sends up
+  to 1 000 and gets 429s.
+- **Ten caches, ten locks.** A "run once" job runs once per instance. A cache miss is fetched ten times.
+
+`resilience-pipeline/redis` moves that state to Redis. This guide shows which state to share, how to wire it, and what
+stays local on purpose. The class-by-class reference is on the [Redis integration page](/integrations/redis/).
+
+## What to share and what to keep local
+
+| State | Shareable | How | Why (or why not) |
+|---|---|---|---|
+| Circuit state (open / closed / isolated) | yes | `sharedCircuitState` + `RedisCircuitStateStore` | One instance that sees the dependency fail opens the circuit for all. |
+| Circuit rolling window (call results) | no | stays local | Each instance judges from its own traffic; only the decision is shared. |
+| Rate limits toward a quota | yes | `RedisRateLimiter`, `redisPartitionLimiter` | The quota belongs to the API key, not to the instance. |
+| Locks ("run once") | yes | `RedisLockStore` | A lock that only one process sees isn't a lock. |
+| Cache entries | yes | `RedisCacheStore` | One fetch fills the cache for every instance. |
+| Cache miss coalescing | no | per process | Concurrent misses on *different* instances each call the loader. |
+| Concurrency limiter, adaptive limiter | no | per process | They protect this process (its event loop, its sockets). Size them per instance. |
+| Retry budget | no | per process | Ratios hold per instance as well as fleet-wide, so local is enough. |
+| Token bucket | no | per process | No Redis token bucket. For a shared limit use `RedisRateLimiter` (sliding window). |
+
+## One client, pipelines at module scope
+
+Create one Redis client per process and build pipelines once, at module scope. A pipeline built per request starts from an
+empty state each time, and with `sharedCircuitState` it would also start a new sync timer per request.
+
+```ts title="redis.ts"
+import Redis from 'ioredis';
+
+// Short timeouts: a rate limit check that waits 10 s for Redis is worse than no rate limit.
+export const redis = new Redis(process.env.REDIS_URL!, { commandTimeout: 200, maxRetriesPerRequest: 1 });
+```
+
+## Shared circuit breaker
+
+```ts twoslash title="payments.ts"
+import type { RedisClient } from 'resilience-pipeline/redis';
+declare const redis: RedisClient;
+// ---cut---
+import { ResiliencePipelineBuilder, sharedCircuitState } from 'resilience-pipeline';
+import { RedisCircuitStateStore } from 'resilience-pipeline/redis';
+
+const circuitStore = new RedisCircuitStateStore({ client: redis });
+
+export const payments = new ResiliencePipelineBuilder({ name: 'payments' })
+  .addRetry({ maxRetryAttempts: 2, delay: '200ms', backoffType: 'exponential', useJitter: true })
+  .addCircuitBreaker({
+    failureRatio: 0.5,
+    minimumThroughput: 20,
+    breakDuration: '30s',
+    extensions: [sharedCircuitState({ store: circuitStore, key: 'payments', syncInterval: '2s' })],
+  })
+  .addTimeout('2s')
+  .build();
+```
+
+What happens when the payments API goes down:
+
+1. Instance A's own window crosses 50% failures. Its circuit opens and it writes `{ state: 'open', openUntil, … }` to `rp:cb:payments`.
+2. Every other instance reads the key within `syncInterval` (2 s here) and opens too, without having seen a single failure.
+3. After `breakDuration`, each instance lets its own probe through. The first one whose probe succeeds closes its circuit
+   and writes `closed`; the others adopt it on their next sync.
+
+The key is one logical breaker. Use the same `key` on every instance that calls the same dependency, and different keys for
+different dependencies (`payments`, `payments-eu`). The rolling window is never written to Redis.
+
+<Aside type="caution" title="Things the shared state does not do">
+- **Agreement takes up to `syncInterval`.** Instances that haven't synced yet keep calling the failing dependency. Lower
+  it for faster agreement; every instance then reads the key more often.
+- **Probes are per instance.** A shared `half-open` is adopted as "open, due for a probe", so ten instances send up to ten
+  probes when the break ends, not one.
+- **Timestamps come from each instance's clock.** `openUntil` and the `updatedAt` that decides which write wins are
+  local `Date.now()` values. Keep clocks in sync (NTP); with a skewed clock an instance waits too long or too short
+  before probing, and its writes can win or lose against newer ones. (Rate limits don't have this problem: they use the Redis server's clock.)
+- **Redis errors don't fail calls.** A failed read or write is reported as `OnCircuitStoreError` and the breaker
+  carries on locally. Alert on that event, or a Redis outage quietly turns the shared breaker back into ten local ones.
+</Aside>
+
+The shared state also gives you a fleet-wide kill switch: `isolate()` through a `CircuitBreakerManualControl` on one
+instance writes `isolated`, and every instance rejects calls until one of them calls `close()`.
+
+## Shared rate limit, with a local fallback
+
+A quota is per API key. Enforce it in Redis so the fleet as a whole stays under it. When Redis is unreachable, `insurance`
+answers from an in-memory limiter instead of failing every call, sized to this instance's share of the quota:
+
+```ts twoslash title="partner.ts"
+import type { RedisClient } from 'resilience-pipeline/redis';
+declare const redis: RedisClient;
+// ---cut---
+import { RateLimiterStrategy, ResiliencePipelineBuilder, WindowCounter } from 'resilience-pipeline';
+import { RedisRateLimiter } from 'resilience-pipeline/redis';
+
+const QUOTA = 100; // calls per minute, for the whole fleet
+const INSTANCES = 4;
+
+export const partner = new ResiliencePipelineBuilder({ name: 'partner-api' })
+  .addStrategy(
+    (s) =>
+      new RateLimiterStrategy(
+        new RedisRateLimiter({ client: redis, key: 'partner-api', permitLimit: QUOTA, window: '1m' }),
+        {
+          queueTimeout: '2s', // wait a little for a permit instead of failing at once
+          // Redis down or slower than 50 ms: this instance's share of the quota, counted locally.
+          insurance: { algorithm: new WindowCounter(Math.floor(QUOTA / INSTANCES), 60_000, 10, s.timeProvider.now()), timeout: '50ms' },
+        },
+        s,
+      ),
+    'PartnerQuota',
+  )
+  .addTimeout('5s')
+  .build();
+```
+
+`WindowCounter(permitLimit, windowMs, segments, origin)` is the same sliding window the in-memory limiters use. Every call
+answered by it reports `OnRateLimiterInsuranceUsed`, so you can see when the fleet runs on local limits.
+
+For a limit per tenant or user across instances, use `redisPartitionLimiter` with `addPartitionedRateLimiter`; the
+[rate-limited APIs guide](/guides/rate-limited-apis/) has the full pattern.
+
+## Run-once jobs: a lock with fencing
+
+```ts twoslash title="nightly.ts"
+import type { RedisClient } from 'resilience-pipeline/redis';
+declare const redis: RedisClient;
+declare function rebuildSearchIndex(fencingToken: number | undefined, signal: AbortSignal): Promise<void>;
+// ---cut---
+import { LockNotAcquiredError, ResiliencePipelineBuilder, getLockToken } from 'resilience-pipeline';
+import { RedisLockStore } from 'resilience-pipeline/redis';
+
+const reindex = new ResiliencePipelineBuilder({ name: 'reindex' })
+  .addLock({ key: () => 'reindex', store: new RedisLockStore({ client: redis }), ttl: '30s' })
+  .build();
+
+// Every instance runs this on a timer; one wins, the rest skip.
+try {
+  await reindex.execute(({ signal }) => rebuildSearchIndex(getLockToken(), signal));
+} catch (e) {
+  if (!(e instanceof LockNotAcquiredError)) throw e;
+}
+```
+
+The lease is renewed every `ttl / 3` while the job runs. If a renewal fails (the instance was paused by GC, or lost Redis),
+the job's `signal` is aborted with `LockLostError`, because another instance may take the lease from then on. Stop writing
+when the signal aborts, and have the protected resource reject writes with a fencing token lower than the highest it has seen:
+that check, not the lease, is what keeps two holders from both writing.
+
+## Shared cache
+
+```ts twoslash
+import type { RedisClient } from 'resilience-pipeline/redis';
+declare const redis: RedisClient;
+type Rates = Record<string, number>;
+declare function fetchRates(signal: AbortSignal): Promise<Rates>;
+// ---cut---
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { RedisCacheStore } from 'resilience-pipeline/redis';
+
+const rates = new ResiliencePipelineBuilder<Rates>({ name: 'fx-rates' })
+  .addCache({ ttl: '1m', staleTtl: '1h', store: new RedisCacheStore({ client: redis, prefix: 'fx:' }) })
+  .addTimeout('2s')
+  .build();
+
+const today = await rates.execute(({ signal }) => fetchRates(signal), { operationKey: 'rates:EUR' });
+```
+
+`staleTtl` makes the shared cache a fleet-wide fallback: while the rates API is down, every instance serves the last value
+any of them fetched. Values go through `JSON.stringify`, so store plain data (a `Date` comes back as a string).
+Concurrent misses are coalesced per process only: right after the entry expires, each instance may fetch once.
+
+## Sizing per-process limits
+
+Limits that stay local are per instance. Size them from the dependency's capacity divided by the instance count, and
+remember that autoscaling changes the divisor:
+
+- **Concurrency limiter toward a database with 100 connections and 5 instances:** `permitLimit: 20` each, or
+  less if other services share the database.
+- **Inbound load shedding:** per instance by nature, since it protects that process; see [load shedding](/guides/load-shedding/).
+- **Insurance limits:** the shared quota divided by the instance count, as above. With autoscaling, divide by the maximum
+  instance count so a scaled-out fleet on insurance still stays under the quota.
+
+## Checklist
+
+- One Redis client per process with short command timeouts; pipelines built once at module scope.
+- `sharedCircuitState` with one `key` per dependency; alert on `OnCircuitStoreError`; clocks synced.
+- Shared quotas in `RedisRateLimiter` with `insurance` sized per instance.
+- Locks used with fencing tokens checked by the protected resource.
+- Per-process limits (concurrency, adaptive, retry budget) sized for one instance.
+
+## Related
+
+- [Redis](/integrations/redis/): every class, option and key layout
+- [Adapters](/integrations/adapters/): rate-limiter-flexible instead of the built-in Redis rate limiter
+- [Circuit breaker](/strategies/circuit-breaker/), [Rate limiting](/strategies/rate-limiting/), [Lock](/strategies/lock/), [Cache](/strategies/cache/)
+- [Serverless](/guides/serverless/): state across cold starts

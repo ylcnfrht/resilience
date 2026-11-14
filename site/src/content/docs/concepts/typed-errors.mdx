@@ -1,0 +1,220 @@
+---
+title: Typed errors
+description: settle() returns an Outcome whose error type is computed from your strategies; Outcome.match() makes handling every error code a compile-time requirement.
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`execute()` throws, and a `catch (e)` gives you `unknown`. The builder already knows which errors its strategies can
+raise: a timeout raises `TIMEOUT`, a circuit breaker `CIRCUIT_OPEN` and `CIRCUIT_ISOLATED`. `settle()` returns them as
+a typed outcome instead of throwing, and `Outcome.match()` makes you handle each one.
+
+## `settle` + `Outcome.match`
+
+```ts twoslash
+declare const db: { findUser(id: string, signal: AbortSignal): Promise<{ id: string; name: string } | null> };
+declare function cachedUser(id: string): { id: string; name: string } | null;
+// ---cut---
+import { ResiliencePipelineBuilder, Outcome } from 'resilience-pipeline';
+
+class NotFound extends Error {
+  readonly code = 'NOT_FOUND' as const;
+}
+
+const pipeline = new ResiliencePipelineBuilder().addTimeout('2s').addCircuitBreaker().build();
+
+const outcome = await pipeline.settle(async ({ signal }) =>
+//    ^?
+  (await db.findUser('42', signal)) ?? Outcome.fromError(new NotFound('42')),
+);
+
+const user = Outcome.match(outcome, {
+  ok: (u) => u,
+  NOT_FOUND: () => null,
+  TIMEOUT: () => cachedUser('42'),
+  CIRCUIT_OPEN: () => cachedUser('42'),
+  CIRCUIT_ISOLATED: () => cachedUser('42'),
+  UNEXPECTED: (e) => {
+    throw e.cause;
+  },
+});
+```
+
+The error type is the union of three sources:
+
+| Source | Example | Code |
+|---|---|---|
+| Errors the strategies can raise | `TimeoutRejectedError`, `BrokenCircuitError` | `TIMEOUT`, `CIRCUIT_OPEN`… |
+| Errors the callback **returns** with `Outcome.fromError(…)` | `NotFound` | your `code` |
+| Anything else, wrapped | a thrown bug, a 4xx, a driver error | `UNEXPECTED` (`UnexpectedError`, original in `.cause`) |
+
+`Outcome.match` needs a handler for `ok` and for every `code` in the union. Forget one and the call doesn't compile.
+At runtime it dispatches on `error.code`.
+
+- **Returned errors are still failures.** Strategies see them like thrown errors, so they can be retried or counted by
+  the breaker (subject to `shouldHandle`).
+- **Opt-in.** `execute()` and `executeOutcome()` don't change.
+- Give your own errors a literal `code` (`readonly code = 'NOT_FOUND' as const`); that is what `match` keys on.
+
+## Strategies that remove errors
+
+A strategy can take errors *out* of the type. Only errors of strategies added **after** it are affected, because
+those are the ones it wraps.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, Outcome } from 'resilience-pipeline';
+class PaymentUnavailable extends Error {
+  readonly code = 'PAYMENT_UNAVAILABLE' as const;
+}
+declare const ok: (v: unknown) => unknown;
+// ---cut---
+// 1. A fallback without shouldHandle catches everything inside: no TIMEOUT, no CIRCUIT_*.
+const a = new ResiliencePipelineBuilder<string>()
+  .addFallback({ fallbackValue: 'cached' })
+  .addTimeout('2s')
+  .addCircuitBreaker()
+  .build();
+
+// 2. addFallbackOn catches the listed codes only. CIRCUIT_OPEN / CIRCUIT_ISOLATED stay.
+const b = new ResiliencePipelineBuilder<string>()
+  .addFallbackOn(['TIMEOUT'], () => 'cached')
+  .addTimeout('2s')
+  .addCircuitBreaker()
+  .build();
+
+// 3. addMapError turns every inner failure into your own error type.
+const c = new ResiliencePipelineBuilder()
+  .addMapError((e) => new PaymentUnavailable('payments down', { cause: e }))
+  .addTimeout('2s')
+  .addCircuitBreaker()
+  .build();
+
+const outcome = await c.settle(() => 'paid');
+Outcome.match(outcome, { ok, PAYMENT_UNAVAILABLE: (e) => e.cause, UNEXPECTED: (e) => e.cause });
+```
+
+| Builder method | `xStrategy()` form | Removes from the type |
+|---|---|---|
+| `addFallback({ … })` without `shouldHandle` | `fallbackStrategy` | Every coded error of the strategies after it |
+| `addFallback({ shouldHandle, … })` | `fallbackStrategy` | Nothing (the predicate isn't analysed) |
+| `addFallbackOn(codes, action)` | `fallbackOnStrategy` | Exactly `codes` |
+| `addMapError(mapper)` | `mapErrorStrategy` | Every coded error after it; adds the mapper's return type |
+
+`addMapError` lets caller aborts through unchanged.
+
+## Narrowing outside `match`
+
+```ts twoslash
+import { ResiliencePipelineBuilder, type PipelineErrors } from 'resilience-pipeline';
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder().addTimeout('2s').addConcurrencyLimiter(10).build();
+
+type Errors = PipelineErrors<typeof pipeline>; // TimeoutRejectedError | BulkheadRejectedError
+
+try {
+  await pipeline.execute(() => fetch('https://example.com'));
+} catch (e) {
+  if (pipeline.isError(e)) console.log(e.code); // 'TIMEOUT' | 'BULKHEAD_FULL'
+}
+```
+
+`isError(e)` is true for any resilience error and for errors produced by `addMapError`.
+
+## Outcome helpers
+
+`Outcome<T, E>` is a plain `{ ok: true, result } | { ok: false, error }` object.
+
+| Helper | Does |
+|---|---|
+| `Outcome.fromResult(v)` / `Outcome.fromError(e)` | Create an outcome |
+| `Outcome.is(v)` | Was `v` created by these helpers (from any copy of the package)? |
+| `Outcome.try(fn)` | Run `fn`, capture a throw or rejection as a failed outcome |
+| `Outcome.try({ try, catch })` | Same, mapping the error to a typed one |
+| `Outcome.all(outcomes)` | `ok([...values])` if all succeeded, else the first failure |
+| `Outcome.partition(outcomes)` | `{ values, errors }`, order kept |
+| `Outcome.unwrap(o)` | The value, or throw the error |
+| `Outcome.unwrapErr(o, code?)` | The error (checking its code); throws if `o` succeeded |
+| `Outcome.match(o, handlers)` | Exhaustive dispatch on `error.code` |
+| `Outcome.from(v)` | Convert a foreign `Result` through a registered adapter |
+
+```ts twoslash
+import { Outcome } from 'resilience-pipeline';
+declare const text: string;
+// ---cut---
+class ConfigError extends Error {
+  readonly code = 'BAD_CONFIG' as const;
+}
+
+const config = Outcome.try({
+  try: () => JSON.parse(text) as { port: number },
+  catch: (e) => new ConfigError('invalid config', { cause: e }),
+});
+const port = config.ok ? config.result.port : 8080;
+```
+
+### Other Result libraries
+
+`registerResultAdapter` teaches `settle()` and `Outcome.from()` another library's Result type (neverthrow,
+ts-results, Effect's `Either`…). A returned `Err` then joins the typed channel like `Outcome.fromError`:
+
+```ts twoslash
+import { Outcome, registerResultAdapter } from 'resilience-pipeline';
+declare class Ok<T> { readonly value: T; isOk(): true }
+declare class Err<E> { readonly error: E; isOk(): false }
+// ---cut---
+registerResultAdapter('neverthrow', {
+  is: (v) => v instanceof Ok || v instanceof Err,
+  toOutcome: (v) => (v instanceof Ok ? Outcome.fromResult(v.value) : Outcome.fromError((v as Err<unknown>).error)),
+});
+```
+
+`resilience-pipeline/outcome` exports the outcome helpers and error classes without any strategy, for code that
+only consumes results.
+
+## Error classes and codes
+
+Every error a strategy raises extends `ExecutionRejectedError` and carries a stable `code`, a `source`
+(`{ pipelineName, strategyName }`) and `toJSON()`.
+
+| Code | Class | Raised by |
+|---|---|---|
+| `TIMEOUT` | `TimeoutRejectedError` | Timeout |
+| `CIRCUIT_OPEN` | `BrokenCircuitError` | Circuit breaker (open or half-open without a probe slot) |
+| `CIRCUIT_ISOLATED` | `IsolatedCircuitError` | Circuit breaker held open by `manualControl.isolate()` |
+| `RATE_LIMITED` | `RateLimiterRejectedError` | Token bucket, fixed/sliding window, partitioned limiters |
+| `BULKHEAD_FULL` | `BulkheadRejectedError` | Concurrency limiter, adaptive concurrency limiter |
+| `PERMIT_LIMIT_EXCEEDED` | `PermitLimitExceededError` | Window limiters: a request heavier than the limit |
+| `RATE_LIMIT_DENIED` | `RateLimiterDeniedError` | Limiters with a matching `deny` rule |
+| `LOCK_NOT_ACQUIRED` | `LockNotAcquiredError` | Lock: held by someone else past `wait` |
+| `UNEXPECTED` | `UnexpectedError` | `settle()` only: wraps everything else |
+
+The rate limiters are typed as `RateLimiterRejectedError`, whose `code` covers `RATE_LIMITED`, `BULKHEAD_FULL`,
+`PERMIT_LIMIT_EXCEEDED` and `RATE_LIMIT_DENIED`. After `addRateLimiter()`, `match` asks for all four.
+HTTP status mapping and `describeResilienceError()` are in [Error codes](/reference/error-codes/).
+
+### Use the guards, not `instanceof`
+
+If two copies of the package are loaded (ESM and CJS, or nested installs), `instanceof` silently returns `false`.
+The guards check registered symbols instead and work across copies:
+
+| Guard | True for |
+|---|---|
+| `isResilienceError(e)` | Any `ExecutionRejectedError` |
+| `isTimeoutError(e)` | `TIMEOUT` |
+| `isBrokenCircuitError(e)` | `CIRCUIT_OPEN`, `CIRCUIT_ISOLATED` |
+| `isRateLimitError(e)` | `RATE_LIMITED`, `BULKHEAD_FULL`, `PERMIT_LIMIT_EXCEEDED`, `RATE_LIMIT_DENIED` |
+| `isRejection(e)` | Any error from a strategy that refused to start the call |
+
+<Aside type="caution" title="Errors from other pipelines">
+`settle()` passes *any* resilience error through unwrapped, including one thrown by a different pipeline your
+callback calls. Its code may not be in this pipeline's type, and `Outcome.match` then throws a `TypeError` at
+runtime. Nest the inner pipeline with `addPipeline()` so its errors join the type, or convert its errors yourself.
+</Aside>
+
+## Related
+
+- [Fallback](/strategies/fallback/): `addFallbackOn`, `addMapError`, `addStaleFallback`
+- [Error codes and HTTP mapping](/reference/error-codes/)
+- [What counts as a failure](/concepts/failures/)

@@ -1,0 +1,126 @@
+---
+title: Runtimes
+description: What works on Node.js, Bun, Deno, Cloudflare Workers and browsers; ESM, CommonJS and the script-tag build; AsyncLocalStorage, diagnostics_channel and unref'd timers.
+sidebar:
+  order: 7
+---
+
+import { Aside, Badge } from '@astrojs/starlight/components';
+
+The core has no static `node:` imports and no dependencies, so the same build runs on Node.js, Bun, Deno, Cloudflare Workers and in browsers. Three features rely on Node APIs. The library looks them up at load time through `process.getBuiltinModule()`, and when a runtime doesn't have them it degrades instead of failing to load:
+
+| Feature | Needs | Without it |
+|---|---|---|
+| [Deadline propagation](/concepts/context-and-signals/), `getResilienceSignal()`, `getResilienceContext()` | `node:async_hooks` (`AsyncLocalStorage`) | Nested pipelines don't inherit the outer signal; the two getters return `undefined`. Pass `signal` explicitly. |
+| Telemetry on the `resilience-pipeline` diagnostics channel | `node:diagnostics_channel` | Nothing is published there. `onTelemetry()` still works everywhere. |
+| `unrefTimers: true`, `unrefSystemTime` | timers with an `unref()` method | Same as the normal clock: pending timers behave as usual. |
+
+Everything else (every strategy, typed errors, `FakeTimeProvider`, the registry, batches, `/fetch`) only uses standard JavaScript: `setTimeout`, `AbortController`, `AbortSignal`, `Promise`, `Map`, `DOMException`.
+
+## Support matrix
+
+| Runtime | Status | `AsyncLocalStorage` | `diagnostics_channel` | `unref()` |
+|---|---|---|---|---|
+| Node.js ≥ 20.16 | Supported (`engines`) | yes | yes | yes |
+| Bun | Supported, tested | yes | yes | yes |
+| Deno 2 | Supported, tested | yes¹ (Deno ≥ 2.1) | yes¹ (Deno ≥ 2.1) | yes on Deno ≥ 2.8; no effect before (`setTimeout` returns a number) |
+| Cloudflare Workers + `nodejs_compat` | Supported, tested | yes¹ | yes¹ | no effect |
+| Cloudflare Workers without `nodejs_compat` | Supported, tested | no | no | no effect |
+| Browsers (ES2022) | Supported | no | no | no effect |
+
+¹ Found through `process.getBuiltinModule()`, so it needs a release of the runtime that provides it. Tested on Node 24.12, Bun 1.3.12, Deno 2.0.0, 2.1.0 and 2.9.6, and workerd (Miniflare 4.20260730, `compatibility_date` 2026-07-01). Deno 2.0 has no `process.getBuiltinModule`, so it degrades like a browser.
+
+**Why Node 20.16:** `process.getBuiltinModule()` arrived in Node 20.16 and 22.3. It lets the core reach `node:async_hooks` and `node:diagnostics_channel` synchronously without a static import that would break browser bundles. On an older Node the library still loads, with the same degradations as a browser.
+
+<Aside type="note">
+The degradation is silent. If deadline propagation matters to you on Deno or Workers, check once at startup: inside `pipeline.execute()`, `getResilienceSignal()` should return the execution's signal, not `undefined`.
+</Aside>
+
+## Node.js
+
+Everything works. Two things are worth knowing:
+
+- **Timers keep the process alive.** A pending retry delay or timeout holds the event loop open, which is what you want in a server. In a CLI, a script or a test runner, pass `unrefTimers: true` to the builder, or `timeProvider: unrefSystemTime` to `retry()` and `withTimeout()`, so a forgotten delay doesn't stop the process from exiting. `createStats()` and the Hystrix stream use unref'd timers by default.
+- **Some subpaths are Node-only** because the frameworks they plug into are: `/nestjs`, `/fastify`, `/koa`, `/prometheus` (`prom-client`) and the `/hystrix` stream handler (Node `req`/`res`). See the table below.
+
+## Bun
+
+Bun provides `process.getBuiltinModule`, `AsyncLocalStorage`, `diagnostics_channel` and `unref()`, so it behaves like Node. Install with `bun add resilience-pipeline`. The Express/Connect and Hono middleware from `/http` work as on Node.
+
+## Deno
+
+Import from npm: `import { ResiliencePipelineBuilder } from 'npm:resilience-pipeline'`, or add it to `deno.json`. `AsyncLocalStorage` and `diagnostics_channel` come from Deno's Node compatibility layer through `process.getBuiltinModule` (Deno ≥ 2.1). `unrefTimers` works on Deno ≥ 2.8, whose global `setTimeout` returns a `Timeout` with `unref()`. On older releases it returns a number, so `unrefTimers` has no effect and a pending delay keeps the process alive.
+
+## Cloudflare Workers
+
+The core needs no flag. Enable `nodejs_compat` in `wrangler.toml` (with a recent `compatibility_date`) to get `AsyncLocalStorage` and `diagnostics_channel`, and with them deadline propagation, `getResilienceSignal()` and the telemetry channel:
+
+```toml title="wrangler.toml"
+compatibility_flags = ["nodejs_compat"]
+```
+
+Things that work differently on Workers:
+
+- **State lives per isolate.** Build pipelines at module scope so the breaker and limiters survive between requests on the same isolate. Different isolates don't share state; persist snapshots in KV or use a shared store (see [Serverless](/guides/serverless/)).
+- **No background work between requests.** Timers run while a request (or `ctx.waitUntil`) is in progress. Don't rely on `circuitHealthCheck`, `sharedCircuitState` sync intervals or `createStats` snapshots firing on an idle isolate.
+- **Pass the request's signal.** There is no wall-clock deadline per request, but the client can disconnect. Pass a signal that aborts on disconnect as `execute(fn, { signal })`; the [Hono middleware](/integrations/express-and-hono/) does this for you.
+
+## Browsers
+
+Supported, with deadline propagation and the diagnostics channel unavailable (see the first table). In practice:
+
+- Pass the signal explicitly: `pipeline.execute(({ signal }) => fetch(url, { signal }))` works everywhere; `getResilienceSignal()` returns `undefined`.
+- An outer pipeline's timeout doesn't reach an inner pipeline on its own. Pass the outer `signal` to the inner `execute()`.
+- `onTelemetry()` and `nextTelemetry()` work, so does `instrument()`.
+- Keep the bundle small with `PipelineBuilder` and the `xStrategy()` factories instead of `ResiliencePipelineBuilder` (see [Bundle size](/concepts/bundle-size/)).
+- The build targets ES2022 (private class fields, `Array.prototype.at`), so it needs a browser from 2022 or later, or a transpile step.
+- For axios in bundled browser code, pass `getAdapter: axios.getAdapter` to `attachResilience()` ([details](/integrations/axios/#bundled-browser-code)).
+
+## Module formats
+
+| Build | Path | Used by |
+|---|---|---|
+| ESM | `dist/esm/*.js` + `.d.ts` | `import`, bundlers (`"module"` and the `import` condition) |
+| CommonJS | `dist/cjs/*.js` + `.d.ts` | `require()` (the `require` condition; `dist/cjs/package.json` sets `"type": "commonjs"`) |
+| Script tag (IIFE) | `dist/browser/resilience-pipeline.min.js` + source map | `<script>` from unpkg or jsDelivr |
+
+Each subpath (`/fetch`, `/testing`, `/nestjs`…) has an ESM and a CommonJS build with its own types, resolved through `exports`. `typesVersions` covers TypeScript setups that don't read `exports` (`moduleResolution: "node"`). The package is `"sideEffects": false`, so bundlers drop what you don't import.
+
+### Two copies in one process
+
+An app that loads both the ESM and the CommonJS build (or two versions of the package) gets two copies of the classes. The library is built for that:
+
+- Errors and outcomes are recognised by registered symbols, not `instanceof`. Use `isTimeoutError()`, `isBrokenCircuitError()`, `isResilienceError()`, `Outcome.is()` and `describeResilienceError()`, which work across copies; `instanceof TimeoutRejectedError` only matches its own copy.
+- `onTelemetry()` only sees events from the copy it was imported from. A subscriber on the `resilience-pipeline` diagnostics channel sees events from every copy.
+- `AsyncLocalStorage` is per copy: a pipeline from one copy doesn't propagate its deadline into a pipeline from the other.
+
+### The script-tag build
+
+`scripts/browser.mjs` bundles the main ESM entry with esbuild into one minified IIFE (`format: 'iife'`, `target: 'es2022'`, `platform: 'browser'`) with a source map. It is what `unpkg` and `jsdelivr` serve for the bare package URL, and it exposes a global `resiliencePipeline`:
+
+```html
+<script src="https://unpkg.com/resilience-pipeline"></script>
+<script>
+  const { ResiliencePipelineBuilder, retry } = window.resiliencePipeline;
+  retry(() => fetch('/api/health'), { maxRetryAttempts: 3, delay: 500 }).then(console.log);
+</script>
+```
+
+It contains the main entry only: everything in `resilience-pipeline`, nothing from the subpaths. For `/fetch`, `/testing` or the others, use a bundler or an ESM CDN.
+
+## Subpaths by runtime
+
+| Subpath | Runs on | Notes |
+|---|---|---|
+| `resilience-pipeline`, `/outcome`, `/testing` | everywhere | |
+| `/fetch` | everywhere `fetch` exists | Node, Bun, Deno, Workers, browsers |
+| `/axios` | wherever axios runs | in bundled browser code pass `getAdapter` |
+| `/http` | Express/Connect (Node, Bun); Hono (every runtime) | `describeResilienceError()` is runtime-neutral |
+| `/redis`, `/adapters` | wherever the client you pass runs | the module itself has no Node imports |
+| `/otel` | wherever `@opentelemetry/api` runs | |
+| `/nestjs` <Badge text="Node" variant="caution" /> | Node, Bun | needs `@nestjs/common` and `@nestjs/core` ≥ 10 |
+| `/fastify`, `/koa` <Badge text="Node" variant="caution" /> | Node, Bun | |
+| `/prometheus` <Badge text="Node" variant="caution" /> | Node, Bun | needs `prom-client` |
+| `/hystrix` <Badge text="Node" variant="caution" /> | Node, Bun | the stream handler writes to a Node `ServerResponse` |
+
+Related: [Installation](/start/installation/), [Context and signals](/concepts/context-and-signals/), [Telemetry](/concepts/telemetry/), [Bundle size](/concepts/bundle-size/), [Serverless](/guides/serverless/).

@@ -1,0 +1,111 @@
+---
+title: createStats
+description: In-process rolling statistics for every pipeline (counts, rejections, cache hits, latency percentiles) for health endpoints and logs, no metrics stack needed.
+sidebar:
+  order: 11
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`createStats()` keeps rolling counts and latency percentiles in memory, from the same telemetry the metric exporters use. Use it for a health endpoint, a periodic log line, an admin page or a test assertion, when you don't run Prometheus or OpenTelemetry (or want the numbers inside the process). It runs anywhere, browsers included.
+
+```ts twoslash
+import { createStats } from 'resilience-pipeline';
+
+const stats = createStats({ pipeline: 'payments', window: '1m' });
+
+const s = stats.snapshot();
+console.log(`${s.failures}/${s.executions} failed, p99 ${s.latency.p99.toFixed(1)} ms, ${s.rejections} rejected`);
+```
+
+## Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `pipeline` | `string` \| `string[]` | every pipeline | Only count the pipelines with these names. |
+| `window` | `Duration` | `'10s'` | Length of the rolling window. |
+| `percentiles` | `number[]` | `[0.5, 0.9, 0.99]` | Latency percentiles to report, as fractions between 0 and 1. |
+| `timeProvider` | `TimeProvider` | system clock, unref'd timers | For tests. |
+
+## The snapshot
+
+```json
+{
+  "timestamp": 1762600000000, "window": 60000,
+  "executions": 1840, "successes": 1795, "failures": 45,
+  "timeouts": 12, "retries": 51, "rejections": 20, "fallbacks": 30,
+  "cacheHits": 0, "cacheMisses": 0, "coalesced": 0,
+  "latency": { "mean": 84.2, "max": 2003.1, "p50": 61.3, "p90": 140.9, "p99": 812.5 },
+  "total": { "executions": 90211, "successes": 89012, "...": "same fields, since createStats()" }
+}
+```
+
+| Field | Counts |
+|---|---|
+| `executions` | Finished executions (`OnPipelineExecuted`). |
+| `successes`, `failures` | Executions by final outcome. A call saved by a fallback is a success. |
+| `timeouts` | `OnTimeout` events: every timed-out attempt, so it can be higher than `failures` when retries recover. |
+| `retries` | `OnRetry` events. |
+| `rejections` | Calls refused by an open circuit, a rate limiter, a concurrency limiter or a held lock. |
+| `fallbacks` | `OnFallback` events. |
+| `cacheHits`, `cacheMisses`, `coalesced` | Cache strategy events. |
+| `latency` | Of whole executions, in **ms**: `mean`, `max` and one `p<N>` key per percentile (`p50`, `p90`, `p99`, `p99.9`…). |
+| `timestamp`, `window` | When the snapshot was taken (epoch ms) and the window length (ms). |
+| `total` | The same counts and latency since `createStats()` was called. |
+
+## Window and accuracy
+
+- The window is kept as **10 buckets**. Data ages out one bucket (window / 10) at a time, so a 1-minute window moves in 6-second steps.
+- Latency goes into a log-scale histogram with 2% wide bins. `mean` and `max` are exact; each percentile is within about **1%** of the true sample, and clamped to the exact min and max, so small samples report real values.
+- Memory is bounded by the number of distinct bins (about 1100 between 1 µs and 1 hour), not by traffic.
+
+## Logging on an interval
+
+```ts twoslash
+import { createStats } from 'resilience-pipeline';
+declare const log: { info(o: object): void };
+// ---cut---
+const stats = createStats({ pipeline: ['payments', 'inventory'] });
+
+const stop = stats.onSnapshot((s) => log.info({ msg: 'resilience stats', ...s }), '30s');
+
+// on shutdown:
+stop();          // this listener only
+stats.dispose(); // stop counting, and every listener
+```
+
+Timers are unref'd: they don't keep the process alive.
+
+## Health endpoint
+
+```ts twoslash
+import { createStats } from 'resilience-pipeline';
+// ---cut---
+const stats = createStats({ pipeline: 'payments', window: '1m' });
+
+export function paymentsHealth() {
+  const s = stats.snapshot();
+  const errorRate = s.executions ? s.failures / s.executions : 0;
+  const status = errorRate > 0.2 || s.latency.p99 > 2000 ? 'degraded' : 'ok';
+  return {
+    status,
+    errorRate: Number(errorRate.toFixed(3)),
+    p99Ms: Math.round(s.latency.p99),
+    rejections: s.rejections,
+    window: `${s.window / 1000}s`,
+  };
+}
+// app.get('/health/payments', (req, res) => res.json(paymentsHealth()));
+```
+
+For breaker states, add `registry.circuitBreakers()` from a [`ResiliencePipelineRegistry`](/concepts/pipelines/).
+
+<Aside type="caution" title="Filtering by name">
+`pipeline` matches the name each event is reported under. The [fetch](/integrations/fetch/) and [axios](/integrations/axios/) integrations run their breaker and attempt timeout in per-host pipelines named `<name>/<origin>`. `createStats({ pipeline: 'payments' })` then counts executions, retries and total timeouts, but not circuit rejections or attempt timeouts. List the per-host names too, or leave `pipeline` out.
+</Aside>
+
+## Related
+
+- [Prometheus](/integrations/prometheus/), [OpenTelemetry](/integrations/opentelemetry/)
+- [Hystrix dashboard](/integrations/hystrix/), built on `createStats`.
+- [Telemetry model](/concepts/telemetry/)

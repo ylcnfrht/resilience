@@ -1,0 +1,30 @@
+---
+title: Interactive demos
+description: Live widgets that run the library in the browser — backoff chart, circuit breaker state machine and the landing-page demo.
+sidebar:
+  hidden: true
+---
+
+import BackoffChart from '../../../components/BackoffChart.tsx';
+import BreakerStateMachine from '../../../components/BreakerStateMachine.tsx';
+import HeroDemo from '../../../components/HeroDemo.tsx';
+
+Preview page for the interactive components. Each one runs the real library in the page.
+
+## Backoff and jitter
+
+Delays come from the library's `computeDelay`, the function `retryStrategy` uses.
+
+<BackoffChart client:visible />
+
+## Circuit breaker
+
+A real circuit breaker with a 3-second break duration. Send failures until it opens, then wait for the probe.
+
+<BreakerStateMachine client:visible />
+
+## Landing-page demo
+
+<HeroDemo client:visible />
+
+For the full simulator, open the [playground](/playground/).

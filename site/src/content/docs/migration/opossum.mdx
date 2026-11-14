@@ -1,0 +1,249 @@
+---
+title: From opossum
+description: Move an opossum CircuitBreaker (timeout, fallback, capacity, cache, health check, events) to a resilience-pipeline, with the defaults that differ.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+**Who this is for:** projects that wrap functions in opossum's `CircuitBreaker` and want retries, hedging, rate limiting, typed errors, shared breaker state across instances, or ESM and TypeScript types in the package.
+
+opossum is one object that bundles a circuit breaker, a timeout, a concurrency cap (`capacity`), a cache and a fallback. Here each of those is a separate strategy in a pipeline, and you pick the order. A pipeline wraps a call, not a function: `pipeline.execute(() => fn(a, b))`, or `pipeline.wrap(fn)` to get a function with the same arguments, like `breaker.fire(a, b)`.
+
+## Concept mapping
+
+| opossum 10 | resilience-pipeline |
+|---|---|
+| `new CircuitBreaker(fn, options)` + `breaker.fire(a, b)` | `builder.addCircuitBreaker(…).build()` + `pipeline.execute(() => fn(a, b))` |
+| `fire` with the action's arguments | `const call = pipeline.wrap(fn)`; `call(a, b)` |
+| `timeout` (default 10 s, on by default) | `addTimeout(ms)` after the breaker (off unless you add it) |
+| `timeout: false` | leave out `addTimeout` |
+| `errorThresholdPercentage: 50` | `failureRatio: 0.5` |
+| `resetTimeout` (default 30 s) | `breakDuration` (default 5 s) |
+| `rollingCountTimeout` (default 10 s) | `samplingDuration` (default 30 s) |
+| `rollingCountBuckets` | no option: the window's resolution is internal |
+| `volumeThreshold` (default 0) | `minimumThroughput` (default 100) |
+| `allowWarmUp` (warm-up = `rollingCountTimeout`) | `warmUpDuration: '10s'` (any length) |
+| `errorFilter: (err) => true` (don't count) | `shouldHandle: ({ outcome }) => …` returns `false` (see differences) |
+| `capacity` | `addConcurrencyLimiter(n)` (rejects at once, like opossum; a queue is optional) |
+| `abortController` / `autoRenewAbortController` / `getSignal()` | `context.signal`, a fresh one per call |
+| `breaker.fallback(fn)` | `addFallback({ fallbackAction })` as the first (outermost) strategy |
+| `cache`, `cacheTTL`, `cacheGetKey`, `cacheTransport` | `addCache({ ttl, key, store })` |
+| `coalesce`, `coalesceTTL` | `addCoalesce()` or `addCache({ ttl, coalesce: true })` |
+| `breaker.healthCheck(fn, interval)` | `extensions: [circuitHealthCheck({ check, interval })]` |
+| `breaker.open()` / `breaker.close()` | `manualControl.isolate()` / `manualControl.close()` |
+| `breaker.disable()` / `enable()` | `pipeline.disable()` / `enable()` (bypasses every strategy) |
+| `breaker.shutdown()` | `pipeline.dispose()` |
+| `breaker.opened` / `closed` / `halfOpen` / `warmUp` | `stateProvider.circuitState` / `stateProvider.isWarmingUp` |
+| `breaker.toJSON()` + `{ state }` option | `stateProvider.snapshot()` + `initialState` |
+| `breaker.stats` | `createStats()`, or `stateProvider.metrics` for the breaker window |
+| `name`, `group` | builder `name`, `tags: { group: '…' }` |
+| `opossum-prometheus` | `instrumentPrometheus()` from `resilience-pipeline/prometheus` |
+| `opossum-hystrix` | `createHystrixStream()` from `resilience-pipeline/hystrix` |
+
+### Events
+
+| opossum event | resilience-pipeline |
+|---|---|
+| `fire` | telemetry `OnPipelineExecuting` |
+| `success` / `failure` | telemetry `OnStrategyExecuted` (`args.outcome.ok`) |
+| `reject` | breaker `onRejected` |
+| `timeout` | timeout `onTimeout` |
+| `open` / `close` / `halfOpen` | `onOpened` / `onClosed` / `onHalfOpened` |
+| `fallback` | fallback `onFallback` |
+| `semaphoreLocked` | concurrency limiter `onRejected` |
+| `healthCheckFailed` | telemetry `OnHealthCheckFailed` |
+| `cacheHit` / `cacheMiss` | cache `onCacheHit` / `onCacheMiss` |
+
+Telemetry events are read with `onTelemetry((e) => …)`. See [Events](/reference/events/).
+
+### Errors
+
+| opossum `error.code` | Class | `code` |
+|---|---|---|
+| `EOPENBREAKER` | `BrokenCircuitError` | `CIRCUIT_OPEN` (`CIRCUIT_ISOLATED` when held open) |
+| `ETIMEDOUT` | `TimeoutRejectedError` | `TIMEOUT` |
+| `ESEMLOCKED` | `BulkheadRejectedError` | `BULKHEAD_FULL` |
+
+## Side by side
+
+### Breaker with timeout and fallback
+
+<Tabs syncKey="opossum">
+<TabItem label="opossum">
+
+```ts
+import CircuitBreaker from 'opossum';
+
+const breaker = new CircuitBreaker(getPrice, {
+  timeout: 3000,
+  errorThresholdPercentage: 50,
+  resetTimeout: 30000,
+  volumeThreshold: 10,
+});
+breaker.fallback(() => cachedPrice);
+breaker.on('open', () => log.warn('prices circuit open'));
+
+const price = await breaker.fire(productId);
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+declare function getPrice(productId: string, signal: AbortSignal): Promise<number>;
+declare const cachedPrice: number;
+declare const productId: string;
+declare const log: { warn(msg: string): void };
+// ---cut---
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder<number>({ name: 'prices' })
+  .addFallback({ fallbackValue: cachedPrice })
+  .addCircuitBreaker({
+    failureRatio: 0.5,
+    breakDuration: '30s',
+    samplingDuration: '10s',
+    minimumThroughput: 10,
+    onOpened: () => log.warn('prices circuit open'),
+  })
+  .addTimeout('3s')
+  .build();
+
+const price = await pipeline.execute(({ signal }) => getPrice(productId, signal));
+```
+
+</TabItem>
+</Tabs>
+
+Order matters: the fallback is first so it also catches the open circuit, and the timeout is inside the breaker so timeouts count as failures. That is the order opossum uses internally. Pass the `signal` on: when the timeout fires, it aborts, so the slow request stops instead of running in the background.
+
+### Keeping the call signature
+
+<Tabs syncKey="opossum">
+<TabItem label="opossum">
+
+```ts
+const breaker = new CircuitBreaker(sendEmail, { timeout: 5000 });
+await breaker.fire(to, subject, body);
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+declare function sendEmail(to: string, subject: string, body: string): Promise<void>;
+declare const to: string, subject: string, body: string;
+// ---cut---
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder().addCircuitBreaker().addTimeout('5s').build();
+const send = pipeline.wrap(sendEmail);
+await send(to, subject, body);
+```
+
+</TabItem>
+</Tabs>
+
+`wrap()` doesn't pass the signal to your function. Inside the call, `getResilienceSignal()` returns it (on runtimes with `AsyncLocalStorage`, see [Runtimes](/concepts/runtimes/)).
+
+### Capacity, cache and health check
+
+<Tabs syncKey="opossum">
+<TabItem label="opossum">
+
+```ts
+const breaker = new CircuitBreaker(getUser, {
+  capacity: 20,
+  cache: true,
+  cacheTTL: 60_000,
+  cacheGetKey: (id) => `user:${id}`,
+});
+breaker.healthCheck(() => db.ping(), 10_000);
+
+const user = await breaker.fire(id);
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+type User = { id: string };
+declare function getUser(id: string): Promise<User>;
+declare const db: { ping(): Promise<void> };
+declare const id: string;
+// ---cut---
+import { ResiliencePipelineBuilder, circuitHealthCheck } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder<User>()
+  .addCache({ ttl: '1m' }) // keyed by operationKey
+  .addCircuitBreaker({ extensions: [circuitHealthCheck({ check: () => db.ping(), interval: '10s' })] })
+  .addConcurrencyLimiter(20)
+  .build();
+
+const user = await pipeline.execute(() => getUser(id), { operationKey: `user:${id}` });
+```
+
+</TabItem>
+</Tabs>
+
+The cache key comes from the execution (`operationKey`, or a `key: (context) => …` option), not from the function's arguments. Concurrent misses for the same key share one call by default (`coalesce: true`).
+
+### State across restarts
+
+<Tabs syncKey="opossum">
+<TabItem label="opossum">
+
+```ts
+const breaker = new CircuitBreaker(fn, { state: saved.state });
+process.on('SIGTERM', () => save(breaker.toJSON()));
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+import type { CircuitSnapshot } from 'resilience-pipeline';
+declare const saved: CircuitSnapshot | undefined;
+declare function save(state: CircuitSnapshot): void;
+// ---cut---
+import { CircuitBreakerStateProvider, ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const state = new CircuitBreakerStateProvider();
+const pipeline = new ResiliencePipelineBuilder()
+  .addCircuitBreaker({ stateProvider: state, initialState: saved })
+  .build();
+
+process.on('SIGTERM', () => save(state.snapshot()));
+```
+
+</TabItem>
+</Tabs>
+
+The snapshot includes the rolling window, so a restored breaker keeps its failure history. To share live state between instances instead, see [Redis](/integrations/redis/).
+
+## Behavioural differences to watch
+
+<Aside type="caution" title="Breaker defaults are not opossum's">
+opossum opens at 50% failures with no minimum volume and stays open 30 s. Our defaults are Polly's: **10% failures over at least 100 calls in 30 s, open for 5 s**. Set `failureRatio`, `minimumThroughput`, `samplingDuration` and `breakDuration` explicitly when you port, and add `addTimeout()`: opossum times out after 10 s by default, a pipeline never does unless you ask.
+</Aside>
+
+- **Threshold comparison.** opossum opens when the error rate is *above* `errorThresholdPercentage`; ours opens when the ratio *reaches* `failureRatio`. At exactly 50% opossum stays closed and we open.
+- **Filtered errors.** An error for which opossum's `errorFilter` returns `true` counts as a **success** and skips the fallback. An error our `shouldHandle` rejects is **ignored**: not a failure, not a success. Our default already ignores 4xx client errors (except 408/429), caller aborts and rejections from other strategies; opossum counts every rejection unless you filter it.
+- **Half-open.** opossum lets the next call through after `resetTimeout` and reopens on the first failure. We let `halfOpenMaxCalls` probes through (default 1), and a probe that runs longer than `halfOpenMaxWait` (30 s) counts as failed.
+- **Fallback scope.** opossum's fallback runs for any failure of that breaker, gets the `fire` arguments, and keeps running while the circuit is open. Ours wraps whatever is after it, receives `{ outcome, context }`, and by default skips caller aborts and 4xx client errors.
+- **Cache key.** opossum keys the cache by `JSON.stringify(args)`. We have no access to the arguments: give each call an `operationKey` or a `key` function. Executions without a key bypass the cache.
+- **Coalescing lifetime.** opossum's coalesce holds results for `coalesceTTL` (default: the timeout). `addCoalesce()` only shares calls that are in flight at the same time; use `addCache({ ttl })` to keep results longer.
+- **One signal per call.** opossum's `abortController` is shared by all calls of a breaker, which is why `autoRenewAbortController` exists. Here every execution and every attempt gets its own `context.signal`.
+- **`disable()`** bypasses every strategy of the pipeline, not only the breaker. To force the breaker alone, use `manualControl`.
+- **No `EventEmitter`.** Callbacks are options, and `onTelemetry()` returns an unsubscribe function, so there is no `MaxListenersExceededWarning` and no `shutdown()` needed to release listeners.
+
+## What you gain
+
+- Retry with backoff and `Retry-After`, hedging, rate limiting, adaptive concurrency, lock, chaos, retry budget.
+- Typed errors with `settle()` and `Outcome.match()`; deadline propagation into nested calls.
+- Breaker state shared across instances through Redis, not only snapshots.
+- TypeScript types in the package, ESM and CommonJS, a `FakeTimeProvider` for tests, OpenTelemetry export.
+
+Related: [Circuit breaker](/strategies/circuit-breaker/), [Cache](/strategies/cache/), [Fallback](/strategies/fallback/).

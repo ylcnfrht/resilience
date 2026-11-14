@@ -1,0 +1,181 @@
+---
+title: Pipelines and strategy order
+description: Build pipelines with either builder, understand why the first strategy added is the outermost, and nest, share, inspect, disable and dispose them.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+A **pipeline** is an ordered list of strategies. `execute(callback)` runs the callback through all of them. Build it
+once and reuse it: stateful strategies (circuit breaker, limiters, cache) keep their state in the pipeline, so a
+pipeline built per call never opens its breaker.
+
+## Two builders
+
+<Tabs syncKey="builder">
+  <TabItem label="ResiliencePipelineBuilder">
+    ```ts twoslash
+    import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+    const pipeline = new ResiliencePipelineBuilder({ name: 'inventory' })
+      .addRetry({ maxRetryAttempts: 3, backoffType: 'exponential' })
+      .addCircuitBreaker({ consecutiveFailures: 5 })
+      .addTimeout('2s')
+      .build();
+    ```
+  </TabItem>
+  <TabItem label="PipelineBuilder (tree-shakeable)">
+    ```ts twoslash
+    import { PipelineBuilder, retryStrategy, circuitBreakerStrategy, timeoutStrategy } from 'resilience-pipeline';
+
+    const pipeline = new PipelineBuilder({ name: 'inventory' })
+      .add(retryStrategy({ maxRetryAttempts: 3, backoffType: 'exponential' }))
+      .add(circuitBreakerStrategy({ consecutiveFailures: 5 }))
+      .add(timeoutStrategy('2s'))
+      .build();
+    ```
+  </TabItem>
+</Tabs>
+
+Both build the same pipeline. `ResiliencePipelineBuilder` has an `addX()` shortcut for every strategy and therefore
+bundles all of them (15.1 KB). `PipelineBuilder` only has `add()`, so only the `xStrategy()` definitions you import
+end up in your bundle. `ResiliencePipelineBuilder` also accepts `add(xStrategy(...))`, so the two mix freely.
+
+| Builder option | Default | Effect |
+|---|---|---|
+| `name` | none | Labels telemetry events (`source.pipelineName`) |
+| `timeProvider` | system clock | Clock for every strategy; `FakeTimeProvider` in tests |
+| `unrefTimers` | `false` | Pending timers don't keep the process alive (CLIs, scripts). Ignored with `timeProvider` |
+| `tags` | none | Labels added to every telemetry event of this pipeline |
+| `instrumentation` | none | Hooks for this pipeline only, or `false` to opt out of all |
+| `telemetry` | `true` | `false` emits no events from this pipeline |
+
+Options are validated, and strategy state is created, on `build()`. Each `build()` creates fresh state.
+
+## Order: the first strategy added is the outermost
+
+Each strategy wraps the ones added after it. The callback sits in the middle:
+
+```
+retry ─▶ circuit breaker ─▶ timeout ─▶ callback
+```
+
+The order changes what each strategy sees:
+
+| Order | Behaviour |
+|---|---|
+| `addRetry()` → `addTimeout('2s')` | **Per-attempt timeout.** Each attempt gets 2 s; a timed-out attempt is retried. |
+| `addTimeout('10s')` → `addRetry()` | **Total budget.** 10 s for all attempts *and* the delays between them. When it runs out, retrying stops. |
+| `addRetry()` → `addCircuitBreaker()` | The breaker counts every attempt. Once it opens, retry stops: an open circuit is never retried. |
+| `addCircuitBreaker()` → `addRetry()` | The breaker counts one outcome per execution, after retries are exhausted. It opens later. |
+| `addFallback()` first | The fallback catches everything inside, including `CIRCUIT_OPEN` and `TIMEOUT`. |
+| `addFallback()` last | The fallback only sees the callback's own failures. Breaker and timeout errors pass it by. |
+| Limiter first | Retries don't need a new permit. Limiter inside retry: each attempt queues again. |
+
+The common production shape combines both timeouts: a total budget outside, per-attempt timeouts inside.
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder()
+  .addFallback({ fallbackValue: null })          // last resort
+  .addTimeout('10s')                             // total budget, retries included
+  .addRetry({ maxRetryAttempts: 3, backoffType: 'exponential', useJitter: true })
+  .addCircuitBreaker({ failureRatio: 0.5, minimumThroughput: 20 })
+  .addTimeout('2s')                              // per attempt
+  .build();
+```
+
+## Executing
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+declare const api: { getUser(id: string): Promise<{ id: string }> };
+const pipeline = new ResiliencePipelineBuilder().addRetry().build();
+// ---cut---
+const a = await pipeline.execute(({ signal }) => fetch('https://example.com', { signal })); // throws on failure
+const b = await pipeline.executeOutcome(() => api.getUser('42'));  // { ok: true, result } | { ok: false, error }
+const c = await pipeline.settle(() => api.getUser('42'));          // typed error union, see Typed errors
+
+const getUser = pipeline.wrap(api.getUser.bind(api));              // same signature, runs through the pipeline
+await getUser('42');
+```
+
+`wrap()` doesn't pass the signal to the wrapped function. Use [`getResilienceSignal()`](/concepts/context-and-signals/)
+inside it, or call `execute` directly.
+
+## Nesting with `addPipeline`
+
+`addPipeline(pipeline)` inserts an existing pipeline as one strategy, **with its state**. Use it to share a
+circuit breaker or limiter between pipelines that call the same dependency:
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+// ---cut---
+const paymentsBreaker = new ResiliencePipelineBuilder({ name: 'payments-breaker' })
+  .addCircuitBreaker({ consecutiveFailures: 5 })
+  .build();
+
+const charge = new ResiliencePipelineBuilder({ name: 'charge' })
+  .addTimeout('5s')
+  .addPipeline(paymentsBreaker)
+  .build();
+
+const refund = new ResiliencePipelineBuilder({ name: 'refund' })
+  .addRetry({ maxRetryAttempts: 2 })
+  .addPipeline(paymentsBreaker)
+  .build();
+```
+
+The nested pipeline's strategies run in place; its own kill switch and `dispose()` are not consulted by the outer
+pipeline. Dispose it yourself.
+
+A pipeline executed *inside the callback* of another one is different: it runs as an independent call but inherits
+the outer signal. That is [deadline propagation](/concepts/context-and-signals/).
+
+## Registry: one pipeline per dependency
+
+`ResiliencePipelineRegistry` builds each keyed pipeline once and returns the same instance afterwards:
+
+```ts twoslash
+import { ResiliencePipelineRegistry } from 'resilience-pipeline';
+// ---cut---
+const registry = new ResiliencePipelineRegistry();
+const inventory = registry.getOrAddPipeline('inventory-api', (b) => b.addRetry().addTimeout(1000));
+
+registry.reload('inventory-api', (b) => b.addRetry({ maxRetryAttempts: 5 })); // `inventory` now runs the new config
+registry.circuitBreakers(); // every breaker: key, name, live strategy (for a health endpoint)
+registry.limiters();        // every limiter
+registry.dispose();         // on shutdown
+```
+
+- `reload()` swaps the pipeline underneath existing references. The old one is disposed and its state dropped.
+- `tryAddBuilder(key, configure)` registers a builder lazily; `getPipeline(key)` throws if none exists.
+- The registry's pipelines are named after their key (override with `pipelineName: (key) => string`).
+
+## Kill switch, inspection, disposal
+
+```ts twoslash
+import { ResiliencePipelineBuilder, type CircuitBreakerStrategy } from 'resilience-pipeline';
+const pipeline = new ResiliencePipelineBuilder().addRetry().addCircuitBreaker().build();
+// ---cut---
+pipeline.disable();   // every call bypasses every strategy (no retries, no breaker, no limits)
+pipeline.enable();
+
+pipeline.describe();  // [{ name: 'Retry', kind: 'RetryStrategy', strategy }, { name: 'CircuitBreaker', … }]
+const breaker = pipeline.getStrategy<CircuitBreakerStrategy<unknown>>('CircuitBreaker');
+breaker?.state;       // 'closed' | 'open' | 'half-open' | 'isolated'
+await breaker?.trip();
+
+pipeline.dispose();   // stops health checks and store sync timers
+```
+
+- `getStrategy()` matches the strategy's `name` (default `'Retry'`, `'CircuitBreaker'`, `'Timeout'`…, or the
+  `name` option) or its class name. Give two strategies of the same kind distinct names.
+- After `dispose()`, `execute()` rejects with a plain `Error` and `executeOutcome()` returns it as a failure.
+
+<Aside type="tip" title="Adding strategies conditionally">
+The builder mutates in place and the `addX()` methods return a new *type* for typed errors. Call
+`builder.addTimeout(…)` without reassigning the variable, or declare it as `ResiliencePipelineBuilder<T, any>`.
+</Aside>

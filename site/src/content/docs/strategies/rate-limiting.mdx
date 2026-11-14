@@ -1,0 +1,377 @@
+---
+title: Rate limiting
+description: Token bucket, fixed and sliding window limiters with weights, fair waiting, even spacing, per-key partitions, block/penalty control and a bursty pool.
+sidebar:
+  order: 8
+---
+import RateLimiterTimeline from '../../../components/RateLimiterTimeline.tsx';
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+A rate limiter caps how many executions start **per unit of time**. Use it to stay under a third-party API quota (outbound), or to protect your service from one client sending too much (inbound, usually per key). It does not cap how many run *at once*: for that, use a [concurrency limiter](/strategies/concurrency-limiter/). Every limiter here is in-process; to share one limit between instances, plug in the [Redis algorithm](/integrations/redis/).
+
+<Tabs syncKey="builder">
+<TabItem label="ResiliencePipelineBuilder">
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+// 10 requests per second, with bursts of up to 10; wait up to 2 s for a token.
+const pipeline = new ResiliencePipelineBuilder()
+  .addRateLimiter({ tokenLimit: 10, replenishmentPeriod: '1s', queueTimeout: '2s' })
+  .build();
+
+await pipeline.execute(({ signal }) => fetch('https://api.vendor.com/v1/items', { signal }));
+```
+</TabItem>
+<TabItem label="PipelineBuilder">
+```ts twoslash
+import { PipelineBuilder, tokenBucketStrategy } from 'resilience-pipeline';
+
+const pipeline = new PipelineBuilder()
+  .add(tokenBucketStrategy({ tokenLimit: 10, replenishmentPeriod: '1s', queueTimeout: '2s' }))
+  .build();
+```
+</TabItem>
+</Tabs>
+
+<Aside type="caution" title="Limits are per process">
+With 4 instances behind a load balancer, an in-memory limit of 100 per minute lets 400 through. Divide the limit by the instance count, or share it through [Redis](/integrations/redis/).
+</Aside>
+
+## Choosing an algorithm
+
+| Builder method | Definition | Counts |
+|---|---|---|
+| `addRateLimiter` | `tokenBucketStrategy` | A bucket of `tokenLimit` tokens, refilled with `tokensPerPeriod` every `replenishmentPeriod`. |
+| `addFixedWindowRateLimiter` | `fixedWindowRateLimiterStrategy` | `permitLimit` per `window`; the count resets at each window boundary. |
+| `addSlidingWindowRateLimiter` | `slidingWindowRateLimiterStrategy` | `permitLimit` in any `window`-long span, tracked in `segmentsPerWindow` buckets. |
+| `addPartitionedRateLimiter` | `partitionedRateLimiterStrategy` | Any of the above, one per key. |
+
+<RateLimiterTimeline client:visible />
+
+| | Token bucket | Fixed window | Sliding window |
+|---|---|---|---|
+| Burst at once | `tokenLimit` | `permitLimit` | `permitLimit` |
+| Worst case in one window-length span | `tokenLimit` + refills in that span | **2 × `permitLimit`** (edge burst) | `permitLimit`, to one segment's precision |
+| Quota comes back | `tokensPerPeriod` at each period | All at once at the boundary | One segment at a time |
+| Cost per call | O(1) | O(1) | O(`segmentsPerWindow`) |
+| Good for | Smooth outbound traffic with some burst | Simple quotas ("1000 per day") | Inbound limits that must hold for any span |
+
+**The edge burst.** With a fixed window of 100 per minute, a client can send 100 requests at 0:59 and 100 more at 1:00: 200 in two seconds, all allowed. A sliding window (10 segments of 6 s) still counts the first 100 at 1:00, so the second 100 waits or is rejected. Use a sliding window when the limit protects something.
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addSlidingWindowRateLimiter({ permitLimit: 100, window: '1m', segmentsPerWindow: 12 })
+  .build();
+```
+
+## Options
+
+### Common options (every limiter)
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `permits` | `(context) => number` | `1` per execution | Weight of an execution (batch size, cost, tokens). Finite and ≥ 0. Above the limit's maximum: rejected with `PermitLimitExceededError`. |
+| `queueTimeout` | `Duration` | `0` (reject at once) | Longest an execution waits for permits (same option as on the concurrency limiters, but here `0` means no waiting). Waiters are served first come, first served: a heavy request is never overtaken by lighter ones. If the permits can't be free before the deadline, it is rejected right away instead of waiting in vain. |
+| `queueLimit` | `number` | no limit | Most executions waiting (with `queueTimeout`); beyond it, rejected at once. Unlike the concurrency limiters (default `0`), the rate limiters wait only when `queueTimeout` is set, so with the defaults nobody queues here either (as in Polly). |
+| `spacing` | `'even'` | – | Delay granted executions so the quota left is spread evenly until the limit resets, instead of bursting at the start of the window. |
+| `minTime` | `Duration` | `0` | Least time between the starts of two granted executions (bottleneck's `minTime`). Also the floor of `'even'` spacing. |
+| `blockDuration` | `Duration` | `0` (off) | Once an execution is rejected for exceeding the limit, reject everything for this long. Rejections during a block don't extend it. |
+| `allow` | `(context) => boolean` | – | Bypass the limiter (no permits taken), e.g. internal callers or health checks. |
+| `deny` | `(context) => boolean` | – | Reject with `RateLimiterDeniedError` right away. Checked before `allow`. |
+| `control` | `RateLimiterControl` | – | Manual penalty, reward, block, unblock and delete (see below). |
+| `insurance` | `{ algorithm: RateLimiterAlgorithm; timeout?: Duration }` | – | In-memory fallback when a remote algorithm throws or takes longer than `timeout` (see below). |
+| `onRejected` | `(args: { context, retryAfter }) => void \| Promise<void>` | – | Called on every rejection. `retryAfter` is in ms, when known. |
+| `name` | `string` | `'RateLimiter'`, `'FixedWindowRateLimiter'` or `'SlidingWindowRateLimiter'` | Strategy name. |
+
+### Token bucket
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `tokenLimit` | `number` | required | Bucket size: the largest burst, and the tokens it starts with. Integer ≥ 1. |
+| `replenishmentPeriod` | `Duration` | required | Refill interval. > 0. |
+| `tokensPerPeriod` | `number` | `tokenLimit` | Tokens added each period (all at once, capped at `tokenLimit`). ≥ 1. |
+
+`{ tokenLimit: 10, replenishmentPeriod: '1s' }` refills the whole bucket every second. For a smoother rate, refill in small steps: `{ tokenLimit: 10, replenishmentPeriod: '100ms', tokensPerPeriod: 1 }`.
+
+### Fixed and sliding window
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `permitLimit` | `number` | required | Permits per window. Integer ≥ 1. |
+| `window` | `Duration` | required | Window length. > 0. |
+| `segmentsPerWindow` | `number` | `10` | Sliding only. Buckets the window slides by: more is smoother and more exact, at O(segments) per call. |
+| `alignment` | `'fixed' \| 'first-request'` | `'fixed'` | `'fixed'`: windows follow each other from the limiter's creation. `'first-request'`: a window starts at the first request after the previous one emptied (per key when partitioned), like "100 per hour from your first call". |
+
+## Weights and fair waiting
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+declare function embed(texts: string[], signal: AbortSignal): Promise<number[][]>;
+declare const texts: string[];
+// ---cut---
+// An embeddings API that allows 10 000 inputs per minute: charge each call its batch size.
+const pipeline = new ResiliencePipelineBuilder()
+  .addSlidingWindowRateLimiter({
+    permitLimit: 10_000,
+    window: '1m',
+    permits: (ctx) => ctx.properties.get('batchSize') as number,
+    queueTimeout: '30s',
+    queueLimit: 100,
+  })
+  .build();
+
+const vectors = await pipeline.execute(({ signal }) => embed(texts, signal), {
+  properties: new Map([['batchSize', texts.length]]),
+});
+```
+
+The queue is strict FIFO: the head waits until its permits fit and nobody overtakes it. A caller whose signal aborts leaves the queue at once.
+
+## Even spacing
+
+A window limiter lets the whole quota through at the start of the window. Many APIs dislike that. `spacing: 'even'` delays each granted execution so the rest of the quota is spread until the limit resets: 4 per second runs at 0, 250, 500 and 750 ms. `minTime` sets a fixed gap between starts instead (or a floor under even spacing).
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addFixedWindowRateLimiter({ permitLimit: 60, window: '1m', spacing: 'even', minTime: '200ms' })
+  .build();
+```
+
+The pacing delay counts against `queueTimeout` when it is set: an execution that would be paced past its `queueTimeout` deadline starts at the deadline instead. An abort during the delay ends it. The permit is not refunded in that case.
+
+## Per-key limits (partitioned)
+
+One limiter per user, tenant or API key, so one noisy key can't use up the others' quota. Partitions are created on first use and dropped when idle.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, SlidingWindowRateLimiterStrategy } from 'resilience-pipeline';
+declare function handle(): Promise<string>;
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder()
+  .addPartitionedRateLimiter({
+    partitionKey: (ctx) => ctx.properties.get('apiKey') as string,
+    limiter: (key, source) =>
+      new SlidingWindowRateLimiterStrategy({ permitLimit: key === 'internal' ? 10_000 : 100, window: '1m' }, source),
+    idleTimeout: '10m',
+    maxPartitions: 50_000,
+  })
+  .build();
+
+await pipeline.execute(handle, { properties: new Map([['apiKey', 'key_123']]) });
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `partitionKey` | `(context) => string` | required | Which partition the execution counts against. If it throws, the execution fails with that error. |
+| `limiter` | `(key, source) => ResilienceStrategy` | required | Creates the limiter of a new partition. Any strategy works; `control` and `snapshot` need `RateLimiterStrategy` partitions (fixed, sliding, token bucket, custom algorithm). |
+| `idleTimeout` | `Duration` | `'10m'` | A partition unused this long (with nothing running) is dropped, resetting its limit. Keep it ≥ the window, or an evicted key gets a fresh quota early. |
+| `maxPartitions` | `number` | no limit | Most partitions kept; past it, the least recently used idle partition is dropped. When every partition is running, a new key is rejected with `RateLimiterRejectedError` instead, so memory stays bounded. Set it for keys you don't control (IPs). |
+| `control` | `RateLimiterControl` | – | Penalty / reward / block per key. |
+| `name` | `string` | `'PartitionedRateLimiter'` | Strategy name. |
+
+The strategy instance (`getStrategy<PartitionedRateLimiterStrategy<unknown>>('PartitionedRateLimiter')`) exposes `partitions` (count), `keys()` (least recently used first) and `delete(key?)` (drop one or every partition: fresh quota, no block).
+
+## Manual control: block, penalty, reward
+
+`RateLimiterControl` changes a limiter's state from outside. `blockDuration` blocks automatically once the limit is hit. Together they cover brute-force protection:
+
+```ts twoslash
+import { RateLimiterControl, ResiliencePipelineBuilder, SlidingWindowRateLimiterStrategy } from 'resilience-pipeline';
+declare function checkPassword(user: string, password: string): Promise<boolean>;
+// ---cut---
+const control = new RateLimiterControl();
+
+const logins = new ResiliencePipelineBuilder()
+  .addPartitionedRateLimiter({
+    partitionKey: (ctx) => ctx.operationKey!,
+    // 5 attempts per 15 min per user; past that, locked out for 1 h.
+    limiter: (_, s) => new SlidingWindowRateLimiterStrategy({ permitLimit: 5, window: '15m', blockDuration: '1h' }, s),
+    idleTimeout: '1h', // >= the block, or an evicted partition forgets it
+    control,
+  })
+  .build();
+
+async function login(user: string, password: string) {
+  const ok = await logins.execute(() => checkPassword(user, password), { operationKey: user });
+  if (ok) await control.delete(user); // success: forget the failed attempts
+  else await control.penalty(2, user); // a wrong password costs 3 permits in total
+  return ok;
+}
+```
+
+| Method | Effect |
+|---|---|
+| `penalty(points, key?)` | Charge `points` permits without an admission check (a token bucket can go negative). |
+| `reward(points, key?)` | Give `points` back; `Infinity` resets the count. Wakes waiters. |
+| `block(duration, key?)` | Reject everything for `duration`. |
+| `unblock(key?)` | End a block. |
+| `delete(key?)` | Fresh quota and no block (drops the partition when partitioned). |
+
+`key` picks a partition; omit it to act on every partition. Single limiters ignore `key`. Pass `control` to the **partitioned** limiter, not to the per-key limiters it creates. `penalty` and `block` create a missing partition; `reward` and `unblock` don't. An algorithm without `adjust` throws a `TypeError` on `penalty` / `reward`.
+
+## Allow and deny lists
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+declare const bannedIps: Set<string>;
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder()
+  .addSlidingWindowRateLimiter({
+    permitLimit: 100,
+    window: '1m',
+    deny: (ctx) => bannedIps.has(ctx.properties.get('ip') as string), // RateLimiterDeniedError, HTTP 403
+    allow: (ctx) => ctx.properties.get('ip') === '10.0.0.1', // no limit, no permits taken
+  })
+  .build();
+```
+
+## Remaining quota and headers
+
+After a limiter admits or rejects an execution, `getRateLimitInfo(context)` returns `{ limit, remaining, resetAfter }` (`resetAfter` in ms; on rejection, until a retry may pass). Read it inside the callback, or pass your own `properties` map and read it afterwards. The `/http`, Fastify and Koa middlewares turn it into `RateLimit-*` headers for you.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, getRateLimitInfo } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder().addFixedWindowRateLimiter({ permitLimit: 100, window: '1h' }).build();
+
+const properties = new Map<string, unknown>();
+await pipeline.execute(async () => 'ok', { properties }).catch(() => undefined);
+
+const info = getRateLimitInfo({ properties });
+// { limit: 100, remaining: 99, resetAfter: ~3_600_000 }
+```
+
+## Bursty limits
+
+`BurstyRateLimiter(primary, burst)` combines a steady limit with a burst allowance. `burst` is consulted only when `primary` rejects: "10 per second, plus up to 20 extra per minute". Run it with `RateLimiterStrategy`:
+
+```ts twoslash
+import { BurstyRateLimiter, RateLimiterStrategy, ResiliencePipelineBuilder, WindowCounter } from 'resilience-pipeline';
+
+const now = Date.now();
+const pipeline = new ResiliencePipelineBuilder()
+  .addStrategy(
+    (s) =>
+      new RateLimiterStrategy(
+        new BurstyRateLimiter(
+          new WindowCounter(10, 1_000, 1, now), // permitLimit, windowMs, segments (1 = fixed), origin
+          new WindowCounter(20, 60_000, 1, now),
+        ),
+        { queueTimeout: '1s' },
+        s,
+      ),
+    'BurstyRateLimiter',
+  )
+  .build();
+```
+
+Both parts can be any `RateLimiterAlgorithm`, sync or async (in-memory or Redis). `permitLimit` is the larger of the two, so a weight only the burst pool can hold still gets in. Penalty / reward hit the primary; a full reset (`control.delete()`) also refills the burst pool.
+
+## Insurance: surviving a remote limiter outage
+
+With a remote algorithm (Redis), a store outage would fail every call. `insurance` answers instead when the remote `acquire` throws or takes longer than `timeout`, and reports `OnRateLimiterInsuranceUsed`. Size it per process: the shared limit divided by the number of instances.
+
+```ts twoslash
+import { type RateLimiterAlgorithm, RateLimiterStrategy, ResiliencePipelineBuilder, WindowCounter } from 'resilience-pipeline';
+declare const redisLimiter: RateLimiterAlgorithm; // e.g. new RedisRateLimiter({ client, key: 'api', permitLimit: 1000, window: '1m' })
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder()
+  .addStrategy((s) =>
+    new RateLimiterStrategy(
+      redisLimiter,
+      { queueTimeout: '1s', insurance: { algorithm: new WindowCounter(250, 60_000, 10, Date.now()), timeout: '50ms' } }, // 4 instances
+      s,
+    ),
+  )
+  .build();
+```
+
+A weight above the smaller insurance limit is charged the whole insurance limit rather than failing.
+
+## Persisting state: snapshot and restore
+
+In serverless or across deploys, a fresh limiter means a fresh quota. `snapshot()` returns JSON-serializable state; `restore()` loads it, aging it by the time passed (windows expire, tokens refill, blocks run out). The partitioned limiter snapshots per key, `snapshot(n)` keeping the `n` most recently used.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, SlidingWindowRateLimiterStrategy } from 'resilience-pipeline';
+declare const kv: { get(key: string): Promise<string | null>; put(key: string, value: string): Promise<void> };
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder().addSlidingWindowRateLimiter({ permitLimit: 100, window: '1m' }).build();
+const limiter = pipeline.getStrategy<SlidingWindowRateLimiterStrategy<unknown>>('SlidingWindowRateLimiter')!;
+
+const saved = await kv.get('limiter');
+if (saved) limiter.restore(JSON.parse(saved)); // throws TypeError on a malformed snapshot
+
+// ... on shutdown, or after each request:
+await kv.put('limiter', JSON.stringify(limiter.snapshot()));
+```
+
+A sliding-window snapshot only restores into a limiter with the same `segmentsPerWindow`.
+
+## Custom algorithms
+
+Every limiter is `RateLimiterStrategy` (waiting, weights, block, allow/deny, insurance, telemetry) around a `RateLimiterAlgorithm` (admission only). Implement the interface to bring your own, e.g. over a database; `acquire` may be async.
+
+```ts twoslash
+import { type AcquireResult, type RateLimiterAlgorithm, RateLimiterStrategy, ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+// Allows `permitLimit` per calendar day (UTC).
+class DailyQuota implements RateLimiterAlgorithm {
+  #day = '';
+  #used = 0;
+  constructor(readonly permitLimit: number) {}
+
+  acquire(permits: number, now: number): AcquireResult {
+    const day = new Date(now).toISOString().slice(0, 10);
+    if (day !== this.#day) {
+      this.#day = day;
+      this.#used = 0;
+    }
+    const resetAfter = Date.parse(`${day}T00:00:00Z`) + 86_400_000 - now;
+    if (this.#used + permits > this.permitLimit) return { ok: false, retryAfter: resetAfter };
+    this.#used += permits;
+    return { ok: true, remaining: this.permitLimit - this.#used, resetAfter };
+  }
+}
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addStrategy((s) => new RateLimiterStrategy(new DailyQuota(1000), {}, s), 'DailyQuota')
+  .build();
+```
+
+| Member | Required | Description |
+|---|---|---|
+| `permitLimit` | yes | Largest weight ever granted. Larger requests are rejected with `PermitLimitExceededError` before `acquire`. |
+| `acquire(permits, now)` | yes | Take the permits if they fit: `{ ok: true, remaining?, resetAfter? }` (both needed for `getRateLimitInfo`), or `{ ok: false, retryAfter }` in ms. A rejection must take nothing. |
+| `adjust(points, now)` | no | Charge (> 0) or refund (< 0) without an admission check; `-Infinity` empties. Enables `penalty` / `reward` / `delete`. |
+| `snapshot(now)` / `restore(state, now)` | no | Enable `snapshot()` / `restore()`. |
+
+`WindowCounter` and `TokenBucket` are exported for reuse (insurance, bursty).
+
+## Events and errors
+
+| Telemetry event | Callback | When |
+|---|---|---|
+| `OnRateLimiterRejected` | `onRejected` | Any rejection. Args: `{ context, retryAfter }`. |
+| `OnRateLimiterInsuranceUsed` | – | The remote algorithm failed or timed out; insurance answered. Args: `{ context, error }`. |
+
+| Error | `code` | HTTP | When |
+|---|---|---|---|
+| `RateLimiterRejectedError` | `RATE_LIMITED` | 429 | Over the limit (`retryAfter` in ms), blocked, or the wait queue is full (`retryAfter` undefined). |
+| `PermitLimitExceededError` | `PERMIT_LIMIT_EXCEEDED` | 429 | `permits` above the limiter's maximum: waiting can never help. Has `permits` and `permitLimit`. |
+| `RateLimiterDeniedError` | `RATE_LIMIT_DENIED` | 403 | Matched `deny`. |
+
+All three extend `RateLimiterRejectedError`, so `isRateLimitError()` and `isRejection()` match them. The default retry predicate does not retry rejections. To wait out a limit instead, use `queueTimeout`. For outbound quotas see [calling rate-limited APIs](/guides/rate-limited-apis/).
+
+## Related
+
+- [Redis](/integrations/redis/): `RedisRateLimiter` and `redisPartitionLimiter` share one limit between instances.
+- [Adapters](/integrations/adapters/): any rate-limiter-flexible backend.
+- [Concurrency limiter](/strategies/concurrency-limiter/)
+- [Multi-instance guide](/guides/multi-instance/)
+- [Error codes](/reference/error-codes/)

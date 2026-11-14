@@ -1,0 +1,267 @@
+---
+title: Load shedding
+description: Protect a service from more traffic than it can serve - request deadlines, a concurrency cap with a short queue, priorities, adaptive limits and fast 503s.
+sidebar:
+  order: 7
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+**The problem.** A service that can handle 500 requests a second gets 800. Nothing rejects the extra 300, so they queue:
+in the event loop, in the connection pool, in the dependency. Latency climbs past the clients' timeouts, clients give up and
+retry, and the server spends its time on requests nobody is waiting for any more. Throughput of *useful* responses drops
+to near zero while the CPU is at 100%. That is congestion collapse, and it outlasts the spike that caused it.
+
+**Load shedding** turns the extra 300 into fast `503`s, so the other 500 still get answered in time. Clients see a few
+quick errors they can retry elsewhere, instead of everyone timing out.
+
+Three tools, all on the inbound side:
+
+1. **A deadline per request**, propagated to every call made while handling it, so work for a request that has run out of time stops.
+2. **A concurrency cap with a short queue**: past it, reject at once.
+3. **Priorities**, so when something has to be rejected, it's the least important traffic.
+
+## The inbound middleware
+
+Each framework integration builds the same inbound pipeline: rate limit (optional) → concurrency limiter → timeout.
+
+<Tabs syncKey="framework">
+<TabItem label="Express">
+```ts
+import express from 'express';
+import { resilienceMiddleware } from 'resilience-pipeline/http';
+
+const app = express();
+app.get('/healthz', (_req, res) => res.send('ok')); // before the middleware: never shed
+app.use(
+  resilienceMiddleware({
+    timeout: '5s',
+    concurrency: { permitLimit: 200, queueLimit: 100, queueTimeout: '500ms' },
+  }),
+);
+```
+</TabItem>
+<TabItem label="Hono">
+```ts
+import { Hono } from 'hono';
+import { honoResilience } from 'resilience-pipeline/http';
+
+const app = new Hono();
+app.use('/api/*', honoResilience({ timeout: '5s', concurrency: { permitLimit: 200, queueLimit: 100, queueTimeout: '500ms' } }));
+```
+</TabItem>
+<TabItem label="Fastify">
+```ts
+import Fastify from 'fastify';
+import { fastifyResilience } from 'resilience-pipeline/fastify';
+
+const app = Fastify();
+// Register and await before the routes, so its onRoute hook sees them.
+await app.register(fastifyResilience, { timeout: '5s', concurrency: { permitLimit: 200, queueLimit: 100, queueTimeout: '500ms' } });
+```
+</TabItem>
+<TabItem label="Koa">
+```ts
+import Koa from 'koa';
+import { koaResilience } from 'resilience-pipeline/koa';
+
+const app = new Koa();
+app.use(koaResilience({ timeout: '5s', concurrency: { permitLimit: 200, queueLimit: 100, queueTimeout: '500ms' } }));
+```
+</TabItem>
+</Tabs>
+
+What a request goes through:
+
+| Situation | Response |
+|---|---|
+| Fewer than 200 requests in flight | Runs at once. |
+| 200 in flight, fewer than 100 waiting | Waits for a slot, at most 500 ms. |
+| Queue full | `503` at once (`BULKHEAD_FULL`, reason `full`). |
+| Waited 500 ms without a slot | `503` (`BULKHEAD_FULL`, reason `queue-timeout`). |
+| Handler runs past 5 s | `504` (`TIMEOUT`). Every pipeline called by the handler is aborted too. |
+| Client disconnects | The request's signal aborts; nested calls are cancelled. No response is sent. |
+
+A full bulkhead is `503`, not `429`: it's your capacity that ran out, not the client's quota. The body is JSON
+(`{ statusCode, error, message }`).
+
+### Choosing the numbers
+
+- **`permitLimit`**: the concurrency at which latency starts to climb. Measure it with a load test: raise the
+  load until p99 latency bends upward, and take the in-flight count at that point. Little's law gives a first guess:
+  target throughput × typical latency (500 req/s × 0.2 s = 100).
+- **`queueLimit`**: a short buffer for bursts, not a place to wait out an overload. One to two times `permitLimit` at most.
+- **`queueTimeout`**: well under the request budget. A request that waited 4 s of a 5 s budget has 1 s left to do 5 s of
+  work; reject it while the client can still retry somewhere else.
+- **`timeout`**: below the timeout of whoever calls you (load balancer, upstream service), so your `504` arrives
+  before they give up and retry.
+
+## Deadlines that reach every call
+
+The inbound timeout isn't only a stopwatch. Every pipeline executed while handling the request runs inside its context
+and inherits its signal, so when the 5 s are up, the database query, the HTTP call and the retry delay underneath are all
+aborted, without passing a signal through every function:
+
+```ts twoslash
+import { ResiliencePipelineBuilder, getResilienceSignal } from 'resilience-pipeline';
+declare function queryInventory(sku: string, signal: AbortSignal): Promise<number>;
+// ---cut---
+const inventory = new ResiliencePipelineBuilder<number>({ name: 'inventory' })
+  .addRetry({ maxRetryAttempts: 3, delay: '200ms' })
+  .addTimeout('2s')
+  .build();
+
+// Called from a route handler: no signal passed in, yet a request that hits its 5 s
+// deadline also stops this call and its retries.
+export const stockOf = (sku: string) => inventory.execute(({ signal }) => queryInventory(sku, signal));
+
+// In plain handler code, read the request's signal directly (undefined outside a request):
+export async function audit(entry: string) {
+  await fetch('https://audit.internal/log', { method: 'POST', body: entry, signal: getResilienceSignal() });
+}
+```
+
+See [context and signals](/concepts/context-and-signals/) for how the propagation works.
+
+<Aside type="caution" title="The 504 doesn't stop your handler">
+The inbound timeout returns `504` as soon as the time is up. Your handler keeps running until it notices the abort. Code
+that ignores the signal still finishes its work (and in Express, its late `res.json()` fails with "headers already sent").
+Pass `context.signal` / `getResilienceSignal()` to everything that accepts one, so shed requests actually free their resources.
+</Aside>
+
+## Priorities: shed the right requests
+
+The built-in `concurrency` option treats every request the same. For priorities, build the inbound pipeline yourself and
+pass it as `pipeline`. The request is in `context.properties` under `HTTP_REQUEST`:
+
+```ts twoslash
+import { ResiliencePipelineBuilder, type ResilienceContext } from 'resilience-pipeline';
+import { HTTP_REQUEST } from 'resilience-pipeline/http';
+
+type Req = { method: string; path: string; headers: Record<string, string | undefined> };
+const req = (ctx: ResilienceContext) => ctx.properties.get(HTTP_REQUEST) as Req;
+
+/** Lower runs sooner. */
+function priority(ctx: ResilienceContext): number {
+  const r = req(ctx);
+  if (r.path.startsWith('/checkout')) return 0; // revenue
+  if (r.headers['x-plan'] === 'paid') return 1;
+  if (r.method === 'GET') return 5;
+  return 10; // background syncs, batch exports
+}
+
+export const inbound = new ResiliencePipelineBuilder({ name: 'inbound' })
+  .addConcurrencyLimiter({
+    permitLimit: 200,
+    queueLimit: 200,
+    queueTimeout: '500ms',
+    priority,
+    // Queue full: a checkout request pushes out the newest queued request of the lowest priority.
+    overflow: 'drop-lowest-priority',
+  })
+  .addTimeout('5s')
+  .build();
+
+// app.use(resilienceMiddleware({ pipeline: inbound }))
+```
+
+How it behaves:
+
+- The queue is ordered by priority, then arrival. When a slot frees, the highest-priority waiter gets it.
+- With `overflow: 'drop-lowest-priority'`, a newcomer that finds the queue full evicts the newest waiter of the lowest
+  priority, if that waiter ranks below it. The evicted request gets `503` with reason `dropped`. If nothing ranks
+  below the newcomer, the newcomer is rejected.
+- `overflow: 'drop-oldest'` is the other option: under overload the oldest waiter is the one least likely to make its
+  deadline, so drop it and serve the fresh one.
+
+Requests already running are never interrupted to make room; priorities only decide who waits and who is rejected.
+
+`HTTP_REQUEST` holds Express's `req`, Hono's `c`, Fastify's `request` or Koa's `ctx`, so read the fields that framework has.
+
+## Adaptive limits: no number to guess
+
+A fixed `permitLimit` is right for one deployment, one instance size and one traffic mix. The
+[adaptive concurrency limiter](/strategies/adaptive-concurrency/) finds the limit at runtime: it raises it while latency
+stays flat and lowers it as soon as latency climbs or requests time out.
+
+```ts twoslash
+import { AdaptiveLimitProvider, ResiliencePipelineBuilder } from 'resilience-pipeline';
+// ---cut---
+export const limit = new AdaptiveLimitProvider();
+
+export const inbound = new ResiliencePipelineBuilder({ name: 'inbound' })
+  .addAdaptiveConcurrencyLimiter({
+    algorithm: 'gradient2',
+    initialLimit: 50,
+    minLimit: 10, // never shed down to nothing
+    maxLimit: 500,
+    queueLimit: 50,
+    queueTimeout: '300ms',
+    limitProvider: limit,
+  })
+  .addTimeout('5s')
+  .build();
+
+// app.use(resilienceMiddleware({ pipeline: inbound }))
+// Expose limit.limit, limit.inflight and limit.queued on a metrics or debug endpoint.
+```
+
+Things to know before you put it in front of a whole service:
+
+- **It learns from latency.** If routes differ wildly (a 5 ms cache hit and a 3 s report), the latency signal is noisy.
+  Give slow routes their own pipeline (`app.use('/reports', resilienceMiddleware({ pipeline: reports }))`) or exclude them.
+- **Timeouts count as overload**, client errors (4xx) and client disconnects don't. That's what you want inbound: a
+  handler that hit its deadline is a sign of saturation.
+- **No priorities.** The adaptive limiter has a single FIFO queue. If you need both, put a fixed concurrency limiter with
+  priorities in front of it, sized at the adaptive limiter's `maxLimit`.
+- **`minLimit`** keeps the service from shedding everything after a burst of slow requests caused by a dependency, not by load.
+
+## Shedding toward dependencies
+
+The same tools protect you from a slow dependency eating every slot. Give each dependency its own bulkhead, so a
+database that slows down can hold at most its share of the requests in flight, and the routes that don't need it keep working:
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+// ---cut---
+const recommendations = new ResiliencePipelineBuilder<string[]>({ name: 'recommendations' })
+  .addFallback({ fallbackAction: () => [] }) // shed = empty list, the page still renders
+  .addConcurrencyLimiter({ permitLimit: 20, queueLimit: 0 })
+  .addTimeout('300ms')
+  .build();
+```
+
+For an optional feature, a shed call answered by a fallback is the best outcome: the user gets the page without that part,
+and the dependency gets breathing room.
+
+## Rate limits per client
+
+The inbound `rateLimit` option is for fairness between callers, not for overload: a per-IP or per-API-key limit
+with `429` and `RateLimit-*` headers. Use it together with the concurrency cap, not instead of it. A rate limit can't
+see that each request suddenly takes ten times longer; the concurrency cap can.
+
+```ts
+app.use(
+  resilienceMiddleware({
+    timeout: '5s',
+    concurrency: { permitLimit: 200, queueLimit: 100, queueTimeout: '500ms' },
+    rateLimit: { key: (req) => req.get('x-api-key') ?? req.ip, permitLimit: 600, window: '1m' },
+  }),
+);
+```
+
+## Checklist
+
+- Inbound timeout below your callers' timeout; signals passed down so shed requests stop working.
+- Concurrency cap from a load test, short queue, `queueTimeout` well under the budget.
+- Health checks and readiness probes registered before the middleware.
+- Priorities (`priority`, `overflow`) when some traffic matters more; adaptive limits when one number can't fit.
+- A bulkhead plus fallback for each optional dependency.
+- Alert on `OnRateLimiterRejected` (bulkhead rejections share this event) and on the 503 rate.
+
+## Related
+
+- [Express and Hono](/integrations/express-and-hono/), [Fastify](/integrations/fastify/), [Koa](/integrations/koa/)
+- [Concurrency limiter](/strategies/concurrency-limiter/), [Adaptive concurrency](/strategies/adaptive-concurrency/)
+- [Context, signals and deadline propagation](/concepts/context-and-signals/)
+- [Calling rate-limited APIs](/guides/rate-limited-apis/): the outbound side of rate limits

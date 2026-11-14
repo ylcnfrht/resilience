@@ -1,0 +1,273 @@
+---
+title: Serverless (Lambda, Workers)
+description: Keep circuit breaker and rate limiter state across cold starts, survive cold-start errors, and enforce per-invocation deadlines on Lambda and Cloudflare Workers.
+sidebar:
+  order: 3
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+**The problem.** A circuit breaker learns from traffic, and serverless keeps throwing that knowledge away:
+
+- **Cold starts reset everything.** A new instance starts with a closed circuit, a full token bucket and an empty failure history.
+- **State is per instance.** Lambda runs one request at a time per instance. With 100 warm instances, each one sees 1% of
+  the traffic, so each one needs its own run of failures before its circuit opens: 100× the failed calls a single server would make.
+- **Cold starts look like failures.** The first calls on a new instance pay for TLS handshakes, connection setup and a cold
+  JIT. A breaker with `consecutiveFailures: 3` can open on a perfectly healthy dependency.
+- **Invocations have a hard deadline.** Lambda kills the invocation at its timeout. Work still running then is lost, with no error handling.
+
+The tools: `snapshot()` / `initialState` to carry state between instances, `sharedCircuitState` to share it live,
+`warmUpDuration` for cold starts, and `withTimeout` around the handler for the deadline.
+
+## Build pipelines once per instance
+
+Pipelines are stateful. Build them at module scope (or lazily on first use) so warm invocations reuse the same breaker and
+limiters. A pipeline built inside the handler starts from scratch on every request: its breaker can never open.
+
+```ts
+// Wrong: a new breaker per invocation.
+export const handler = async () => {
+  const payments = new ResiliencePipelineBuilder().addCircuitBreaker().build();
+  …
+};
+```
+
+## Persist the breaker between instances
+
+`CircuitBreakerStateProvider.snapshot()` returns the breaker's state as plain JSON: state, when an open circuit lets a probe
+through, the consecutive-failure count and the rolling window. Pass it back as `initialState` and a new instance resumes
+where the old one stopped. A circuit that was half-open resumes as open and due for a probe, because the probe that was in
+flight is gone.
+
+<Tabs>
+<TabItem label="Cloudflare Workers + KV">
+
+```ts twoslash
+// Minimal Workers types, so the example stands alone.
+interface KVNamespace {
+  get(key: string, type: 'json'): Promise<unknown>;
+  put(key: string, value: string): Promise<void>;
+}
+interface ExecutionContext {
+  waitUntil(promise: Promise<unknown>): void;
+}
+declare function chargeCard(body: unknown, signal: AbortSignal): Promise<Response>;
+// ---cut---
+import { CircuitBreakerStateProvider, ResiliencePipelineBuilder, type CircuitSnapshot } from 'resilience-pipeline';
+
+interface Env {
+  BREAKERS: KVNamespace;
+}
+
+const KEY = 'breaker:payments';
+const state = new CircuitBreakerStateProvider();
+let changed = false; // set by the breaker, flushed at the end of the request that changed it
+
+function buildPayments(saved: CircuitSnapshot | undefined) {
+  return new ResiliencePipelineBuilder<Response>({ name: 'payments' })
+    .addRetry({ maxRetryAttempts: 2, delay: '200ms', backoffType: 'exponential', useJitter: true })
+    .addCircuitBreaker({
+      consecutiveFailures: 5, // per-isolate traffic is low: a ratio over 100 calls would never trip
+      breakDuration: '30s',
+      warmUpDuration: '10s',
+      stateProvider: state,
+      initialState: saved,
+      onOpened: () => void (changed = true),
+      onClosed: () => void (changed = true),
+    })
+    .addTimeout('3s')
+    .build();
+}
+
+// One build per isolate. Concurrent first requests share the same promise.
+let payments: Promise<ReturnType<typeof buildPayments>> | undefined;
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    payments ??= env.BREAKERS.get(KEY, 'json')
+      .catch(() => null) // KV unavailable: start closed rather than fail every request
+      .then((saved) => buildPayments((saved as CircuitSnapshot | null) ?? undefined));
+    const pipeline = await payments;
+    const body = await request.json();
+    try {
+      return await pipeline.execute(({ signal }) => chargeCard(body, signal));
+    } finally {
+      if (changed) {
+        changed = false;
+        // After the response is sent, without delaying it.
+        ctx.waitUntil(env.BREAKERS.put(KEY, JSON.stringify(state.snapshot())));
+      }
+    }
+  },
+};
+```
+
+</TabItem>
+<TabItem label="AWS Lambda + Redis">
+
+For Lambda, `sharedCircuitState` does the bookkeeping: it pulls the shared state when the instance starts, pushes every
+local state change, and pulls again every `syncInterval` while the instance runs. One instance seeing the payment API fail
+opens the circuit for all of them.
+
+```ts twoslash
+import type { RedisClient } from 'resilience-pipeline/redis';
+declare const redis: RedisClient; // an ioredis client, created at module scope
+declare function chargeCard(order: unknown, signal: AbortSignal): Promise<Response>;
+// ---cut---
+import { ResiliencePipelineBuilder, sharedCircuitState } from 'resilience-pipeline';
+import { RedisCircuitStateStore } from 'resilience-pipeline/redis';
+
+// Module scope: built once per instance, reused by warm invocations.
+const payments = new ResiliencePipelineBuilder<Response>({ name: 'payments' })
+  .addCircuitBreaker({
+    consecutiveFailures: 5,
+    breakDuration: '30s',
+    warmUpDuration: '10s',
+    extensions: [sharedCircuitState({ store: new RedisCircuitStateStore({ client: redis }), key: 'payments', syncInterval: '5s' })],
+  })
+  .addTimeout('3s')
+  .build();
+
+export const handler = async (order: unknown) => payments.execute(({ signal }) => chargeCard(order, signal));
+```
+
+The sync timer is `unref`'d and Lambda freezes it between invocations, so it costs nothing while idle. See
+[multi-instance](/guides/multi-instance/) for how conflicting states are resolved.
+
+</TabItem>
+</Tabs>
+
+What to save, and when:
+
+- **Save on state changes, not per request.** Writes on `onOpened` / `onClosed` are rare. Cloudflare KV in particular
+  limits writes per key to about one per second, and reads may lag writes by up to a minute in other locations; for breaker
+  state that lag is acceptable, for anything stricter use a Durable Object or Redis.
+- **The rolling window is in the snapshot** (`window`), so a ratio-based breaker keeps its failure history. With
+  `consecutiveFailures` the count is saved too, but only as of the last write; failures between two writes are lost, which
+  only delays an opening.
+- **Only restore snapshots you wrote.** `initialState` trusts its top-level fields. Malformed `window` data is ignored, but
+  a `state` that isn't one of `'closed' | 'open' | 'half-open' | 'isolated'` is not rejected. Validate if the store is shared with other code.
+
+## Cold starts and `warmUpDuration`
+
+`warmUpDuration` keeps the breaker from opening for a while after it is created. Failures are still recorded, so if the
+dependency really is down, the window is already full when warm-up ends and the circuit opens on the next failure.
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder()
+  .addCircuitBreaker({ consecutiveFailures: 3, breakDuration: '30s', warmUpDuration: '15s' })
+  .addTimeout('2s')
+  .build();
+```
+
+Warm-up only prevents new openings. A circuit restored as open from `initialState` stays open until its break ends.
+`CircuitBreakerStateProvider.isWarmingUp` tells you whether an instance is still in warm-up, for logs or health checks.
+
+## Rate limiter state: `snapshot()` / `restore()`
+
+A per-instance limiter that protects a quota (a cron function that may send 100 calls per minute) gets a fresh full bucket on
+every cold start. Save the limiter's state at the end of the run and restore it on the next start; time that passed in
+between counts (tokens refill, windows expire, blocks run out).
+
+```ts twoslash
+import type { TokenBucketStrategy } from 'resilience-pipeline';
+declare const kv: { get(key: string): Promise<string | null>; put(key: string, value: string): Promise<void> };
+declare function syncCustomer(id: string, signal: AbortSignal): Promise<void>;
+declare const customerIds: string[];
+// ---cut---
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const crm = new ResiliencePipelineBuilder({ name: 'crm', unrefTimers: true })
+  .addRateLimiter({ tokenLimit: 100, replenishmentPeriod: '1m', queueTimeout: '1m' })
+  .build();
+const limiter = crm.getStrategy<TokenBucketStrategy<any>>('RateLimiter')!;
+
+const saved = await kv.get('limiter:crm');
+if (saved) {
+  try {
+    limiter.restore(JSON.parse(saved));
+  } catch {
+    // Throws TypeError on a malformed or incompatible snapshot (e.g. after changing segmentsPerWindow): start fresh.
+  }
+}
+
+try {
+  for (const id of customerIds) await crm.execute(({ signal }) => syncCustomer(id, signal));
+} finally {
+  await kv.put('limiter:crm', JSON.stringify(limiter.snapshot()));
+}
+```
+
+Every in-memory limiter supports this: token bucket, fixed and sliding window, and `BurstyRateLimiter` built from them.
+A partitioned limiter's `snapshot(limit?)` saves the `limit` most recently used partitions (default: all), so the saved
+state stays small with many keys. `restore()` recreates them.
+
+If several instances run **at the same time**, saving and restoring doesn't make them share a limit: each restores the same
+state and then spends it independently. Use a Redis-backed limiter for that ([multi-instance](/guides/multi-instance/)).
+
+## `unrefTimers` for scripts and jobs
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder({ unrefTimers: true }).addRetry({ delay: '30s' }).addTimeout('10s').build();
+```
+
+With `unrefTimers: true`, pending retry delays and timeouts don't keep a Node or Bun process alive (or Deno ≥ 2.8; older Deno timers have no `unref()`, so it has no effect there). A CLI, a cron
+script or a queue worker exits when its real work is done, instead of waiting out a 30 s retry delay that nobody needs.
+The option is ignored when you pass your own `timeProvider`, and makes no difference on Workers and in browsers.
+
+## Per-invocation deadlines
+
+On Lambda, the invocation is killed when its configured timeout passes. Wrap the handler body in `withTimeout` with the
+remaining time minus a margin. Every pipeline executed underneath inherits that deadline through `AsyncLocalStorage`, so
+calls that are still waiting are aborted in time to return a proper error, release locks or requeue the message.
+
+```ts twoslash
+interface LambdaContext { getRemainingTimeInMillis(): number }
+interface SQSEvent { Records: Array<{ messageId: string; body: string }> }
+declare function processOrder(body: string): Promise<void>;
+// ---cut---
+import { isTimeoutError, withTimeout } from 'resilience-pipeline';
+
+export const handler = async (event: SQSEvent, context: LambdaContext) => {
+  const failures: Array<{ itemIdentifier: string }> = [];
+  for (const record of event.Records) {
+    // Keep 1 s to report back. withTimeout rejects a duration <= 0, hence the floor.
+    const budget = Math.max(1, context.getRemainingTimeInMillis() - 1_000);
+    try {
+      // processOrder → paymentsPipeline.execute(…) → fetch(…, { signal }): all aborted when the budget runs out.
+      await withTimeout(() => processOrder(record.body), budget);
+    } catch (error) {
+      if (!isTimeoutError(error)) console.error(error);
+      failures.push({ itemIdentifier: record.messageId }); // SQS redelivers only these
+    }
+  }
+  return { batchItemFailures: failures };
+};
+```
+
+<Aside type="note">
+Deadline propagation needs `AsyncLocalStorage`: available on Node, Bun and Deno, and on Workers with the `nodejs_compat`
+flag. Without it, pass the signal explicitly (`execute(fn, { signal })`) to every pipeline.
+</Aside>
+
+On Workers there's no fixed wall-clock deadline per request, but there is a client that can go away. If your framework gives
+you a request signal that aborts on disconnect, pass it as `execute(fn, { signal })`; [Hono's middleware](/integrations/express-and-hono/) does that for you.
+
+## Checklist
+
+- Pipelines at module scope, built once per instance.
+- `consecutiveFailures` (or `samplingCount`) instead of a ratio over 100 calls: per-instance traffic is low.
+- `warmUpDuration` so cold-start errors can't open the circuit.
+- Breaker state persisted on change (`snapshot()` / `initialState`) or shared live (`sharedCircuitState`).
+- Limiter state saved and restored around runs, or a Redis limiter when instances run concurrently.
+- `withTimeout` around the handler with the remaining time, and `unrefTimers` for scripts.
+
+## Related
+
+- [Circuit breaker](/strategies/circuit-breaker/) (persistence, warm-up)
+- [Rate limiting](/strategies/rate-limiting/) (snapshot / restore)
+- [Runtimes](/concepts/runtimes/) and [Context, signals and deadline propagation](/concepts/context-and-signals/)

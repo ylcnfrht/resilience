@@ -1,0 +1,267 @@
+---
+title: From cockatiel
+description: Move cockatiel policies (retry, circuitBreaker, timeout, bulkhead, fallback, wrap) to a resilience-pipeline builder, with the defaults that differ.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+**Who this is for:** projects using cockatiel's policies (`retry`, `circuitBreaker`, `timeout`, `bulkhead`, `fallback`, `wrap`) that want hedging, rate limiting, caching, typed errors, shared state across instances, or framework integrations.
+
+Both libraries descend from Polly, so the concepts map one to one. The main change is shape: cockatiel builds separate policies and `wrap()`s them; here you add strategies to one builder. The order rule is the same: **the first one is the outermost**.
+
+## Concept mapping
+
+| cockatiel 4 | resilience-pipeline |
+|---|---|
+| `wrap(retry, breaker, timeout)` | `builder.addRetry(…).addCircuitBreaker(…).addTimeout(…)` (same order) |
+| `retry(policy, { maxAttempts })` | `addRetry({ maxRetryAttempts })` (both count retries, not attempts) |
+| `new ExponentialBackoff({ initialDelay, maxDelay })` | `backoffType: 'exponential', useJitter: true, delay, maxDelay` |
+| `new ConstantBackoff(ms)` | `delay: ms` (constant is the default type) |
+| `new IterableBackoff([100, 200, 500])` | `delayGenerator: backoff.sequence([100, 200, 500])` |
+| `new DelegateBackoff(fn)` | `delayGenerator: (args) => ms` |
+| `handleAll` | `shouldHandle: ({ outcome }) => !outcome.ok` |
+| `handleType(E, filter)` / `.orType(…)` | `new PredicateBuilder().handle(E, filter).handle(…)` |
+| `handleWhen(fn)` | `shouldHandle: ({ outcome }) => !outcome.ok && fn(outcome.error)` |
+| `handleResultType` / `handleWhenResult` | `PredicateBuilder.handleResult(fn)` |
+| `circuitBreaker(policy, { halfOpenAfter, breaker })` | `addCircuitBreaker({ breakDuration, … })` |
+| `new ConsecutiveBreaker(5)` | `consecutiveFailures: 5` |
+| `new SamplingBreaker({ threshold, duration, minimumRps })` | `failureRatio`, `samplingDuration`, `minimumRps` |
+| `new CountBreaker({ threshold, size, minimumNumberOfCalls })` | `failureRatio`, `samplingCount`, `minimumThroughput` |
+| custom `IBreaker` | `breaker: { record, shouldOpen, reset }` |
+| `halfOpenAfter: new ExponentialBackoff()` | `breakDurationGenerator: ({ halfOpenAttempts }) => …` |
+| `breaker.isolate()` (returns a disposable) | `manualControl.isolate()` (returns a release function) |
+| `breaker.state` | `stateProvider.circuitState` (`'closed' \| 'open' \| 'half-open' \| 'isolated'`) |
+| `breaker.toJSON()` / `initialState` | `stateProvider.snapshot()` / `initialState` |
+| `timeout(ms, TimeoutStrategy.Aggressive)` | `addTimeout(ms)` |
+| `timeout(ms, TimeoutStrategy.Cooperative)` | `addTimeout({ timeout: ms, cooperative: true })` |
+| `bulkhead(limit, queue)` | `addConcurrencyLimiter(limit, queue)` |
+| `fallback(policy, valueOrFactory)` | `addFallback({ fallbackValue })` or `{ fallbackAction }` |
+| `@usePolicy(policy)` | `@resilient(pipeline)` |
+| `noop` | an empty pipeline, or `pipeline.disable()` |
+| `policy.execute(fn, signal)` | `pipeline.execute(fn, { signal })` |
+| context `{ attempt, signal }` | context `{ attemptNumber, signal, … }` |
+| `.dangerouslyUnref()` | builder option `unrefTimers: true` |
+| `onRetry` / `onGiveUp` | `onRetry` / `onRetryExhausted` |
+| `onBreak` / `onReset` / `onHalfOpen` | `onOpened` / `onClosed` / `onHalfOpened` |
+| `onSuccess` / `onFailure` | `onTelemetry` events `OnExecutionAttempt`, `OnStrategyExecuted` |
+| `Event.toPromise(event)` | `nextTelemetry((e) => e.event === '…')` |
+| `TaskCancelledError` (timeout) | `TimeoutRejectedError` (`code: 'TIMEOUT'`) |
+| `BrokenCircuitError`, `IsolatedCircuitError`, `BulkheadRejectedError` | same names, plus a stable `code` |
+
+## Side by side
+
+### Retry, breaker, timeout
+
+<Tabs syncKey="cockatiel">
+<TabItem label="cockatiel">
+
+```ts
+import { ConsecutiveBreaker, ExponentialBackoff, TimeoutStrategy, circuitBreaker, handleAll, retry, timeout, wrap } from 'cockatiel';
+
+const retryPolicy = retry(handleAll, { maxAttempts: 3, backoff: new ExponentialBackoff() });
+const breakerPolicy = circuitBreaker(handleAll, { halfOpenAfter: 10_000, breaker: new ConsecutiveBreaker(5) });
+const timeoutPolicy = timeout(2_000, TimeoutStrategy.Aggressive);
+
+const policy = wrap(retryPolicy, breakerPolicy, timeoutPolicy);
+const data = await policy.execute(({ signal }) => fetch(url, { signal }));
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+declare const url: string;
+// ---cut---
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addRetry({ maxRetryAttempts: 3, backoffType: 'exponential', useJitter: true, delay: 128, maxDelay: '30s' })
+  .addCircuitBreaker({ consecutiveFailures: 5, breakDuration: '10s' })
+  .addTimeout('2s')
+  .build();
+
+const data = await pipeline.execute(({ signal }) => fetch(url, { signal }));
+```
+
+</TabItem>
+</Tabs>
+
+`delay: 128, maxDelay: '30s'` with `useJitter: true` reproduces `ExponentialBackoff`'s defaults (decorrelated jitter, 128 ms first delay, 30 s cap). For the smallest browser bundle, use `PipelineBuilder` with `retryStrategy()`, `circuitBreakerStrategy()` and `timeoutStrategy()` instead.
+
+### Handling specific errors and results
+
+<Tabs syncKey="cockatiel">
+<TabItem label="cockatiel">
+
+```ts
+import { handleType, retry, ConstantBackoff } from 'cockatiel';
+
+const policy = handleType(NetworkError)
+  .orType(HttpError, (err) => err.statusCode === 503)
+  .orWhenResult((res: Response) => res.status === 429);
+
+const retryPolicy = retry(policy, { maxAttempts: 5, backoff: new ConstantBackoff(500) });
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+class NetworkError extends Error {}
+class HttpError extends Error { statusCode = 500 }
+// ---cut---
+import { PredicateBuilder, ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder<Response>()
+  .addRetry({
+    maxRetryAttempts: 5,
+    delay: 500,
+    shouldHandle: new PredicateBuilder<Response>()
+      .handle(NetworkError)
+      .handle(HttpError, (err) => err.statusCode === 503)
+      .handleResult((res) => res.status === 429),
+  })
+  .build();
+```
+
+</TabItem>
+</Tabs>
+
+### Sampling breaker with persisted state
+
+<Tabs syncKey="cockatiel">
+<TabItem label="cockatiel">
+
+```ts
+import { SamplingBreaker, circuitBreaker, handleAll } from 'cockatiel';
+
+const breaker = circuitBreaker(handleAll, {
+  halfOpenAfter: 10_000,
+  breaker: new SamplingBreaker({ threshold: 0.2, duration: 30_000, minimumRps: 5 }),
+  initialState: saved,
+});
+breaker.onBreak(() => save(breaker.toJSON()));
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+import type { CircuitSnapshot } from 'resilience-pipeline';
+declare const saved: CircuitSnapshot | undefined;
+declare function save(state: CircuitSnapshot): void;
+// ---cut---
+import { CircuitBreakerStateProvider, ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const state = new CircuitBreakerStateProvider();
+const pipeline = new ResiliencePipelineBuilder()
+  .addCircuitBreaker({
+    breakDuration: '10s',
+    failureRatio: 0.2,
+    samplingDuration: '30s',
+    minimumRps: 5,
+    minimumThroughput: 1, // the ratio rule's own floor; minimumRps already guards quiet periods
+    stateProvider: state,
+    initialState: saved,
+    onOpened: () => save(state.snapshot()),
+  })
+  .build();
+```
+
+</TabItem>
+</Tabs>
+
+Our snapshot also includes the rolling window, so a restored breaker keeps its failure history.
+
+### Bulkhead and fallback
+
+<Tabs syncKey="cockatiel">
+<TabItem label="cockatiel">
+
+```ts
+import { bulkhead, fallback, handleAll, wrap } from 'cockatiel';
+
+const policy = wrap(fallback(handleAll, () => cachedRates), bulkhead(10, 50));
+const rates = await policy.execute(() => getRates());
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts twoslash
+declare const cachedRates: number[];
+declare function getRates(): Promise<number[]>;
+// ---cut---
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder<number[]>()
+  .addFallback({ fallbackAction: () => cachedRates }) // also catches the full bulkhead
+  .addConcurrencyLimiter(10, 50)
+  .build();
+
+const rates = await pipeline.execute(() => getRates());
+```
+
+</TabItem>
+</Tabs>
+
+### Decorators
+
+<Tabs syncKey="cockatiel">
+<TabItem label="cockatiel">
+
+```ts
+import { usePolicy } from 'cockatiel';
+
+class Db {
+  @usePolicy(policy)
+  async getUser(id: string, context?: IRetryContext) { /* … */ }
+}
+```
+
+</TabItem>
+<TabItem label="resilience-pipeline">
+
+```ts
+import { getResilienceSignal, resilient } from 'resilience-pipeline';
+
+class Db {
+  @resilient(pipeline)
+  async getUser(id: string) {
+    const signal = getResilienceSignal(); // the context isn't appended to the arguments
+    /* … */
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+`@resilient` works with both standard (TC39) and `experimentalDecorators`. `@usePolicy` appends the context as the last argument; `@resilient` leaves your arguments alone and exposes the context through `getResilienceContext()` / `getResilienceSignal()`.
+
+## Behavioural differences to watch
+
+<Aside type="caution" title="Retry defaults are not cockatiel's">
+cockatiel's `retry()` defaults to unlimited attempts with no delay. Ours are Polly's: **3 retries, 2 s constant delay**. Set `maxRetryAttempts`, `delay` and `backoffType` explicitly when you port.
+</Aside>
+
+- **`handleAll` vs our default.** Without `shouldHandle`, retry and the breaker skip 4xx client errors (except 408/429), rejections from other strategies and caller aborts. Even with `shouldHandle: ({ outcome }) => !outcome.ok`, an **open circuit is never retried**, and the breaker never counts rejections.
+- **A breaker needs no explicit algorithm.** `addCircuitBreaker()` alone uses Polly's defaults: 10% failures over at least 100 calls in 30 s, 5 s break. Port your `halfOpenAfter` to `breakDuration` and your breaker to the matching options.
+- **Unhandled errors are ignored by the breaker**: they don't count as failures or successes.
+- **Half-open probes are bounded.** A probe that hangs longer than `halfOpenMaxWait` (30 s) counts as failed, so the circuit can't stay half-open forever. `halfOpenMaxCalls` lets several probes through.
+- **Attempt numbers.** `context.attemptNumber` is 0 on the first call, like cockatiel's `context.attempt`. In `onRetry`, cockatiel's `attempt` is the upcoming retry (starting at 1); our `attemptNumber` is the attempt that just failed (starting at 0), so ours is one lower.
+- **Timeout errors.** An aggressive cockatiel timeout throws `TaskCancelledError`; ours throws `TimeoutRejectedError`. Both abort the signal.
+- **Events.** cockatiel's events return disposables; our callbacks are options, and `onTelemetry()` returns an unsubscribe function.
+- **Bundle size.** cockatiel is smaller: 3.7 KB against our 7.1 KB for retry + breaker + timeout (min+gzip). See [Bundle sizes](/reference/bundle-sizes/).
+
+## What you gain
+
+- Hedging, token-bucket / window / per-key rate limiting, adaptive concurrency, cache and coalesce, lock, chaos, retry budget.
+- Typed errors with `settle()` and `Outcome.match()`, and stable `code`s on every error.
+- Shared breaker, limiter, cache and lock state across instances with Redis.
+- A `FakeTimeProvider` instead of fake timers, deadline propagation, `/fetch` and `/axios` clients, OpenTelemetry and Prometheus adapters, NestJS / Express / Fastify / Koa / Hono middleware.
+- CommonJS as well as ESM, and Node 20.
+
+Related: [Pipelines](/concepts/pipelines/), [Circuit breaker](/strategies/circuit-breaker/).

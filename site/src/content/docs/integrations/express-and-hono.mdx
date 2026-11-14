@@ -1,0 +1,230 @@
+---
+title: Express and Hono
+description: Inbound middleware with a request deadline that propagates to every call underneath, load shedding, per-client rate limits and 504/503/429 responses.
+sidebar:
+  order: 3
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+The outbound integrations protect you from your dependencies. The inbound middleware protects your service from its callers. One middleware gives every request:
+
+- **a deadline** that propagates to every pipeline called while handling it, even ones that never receive a signal;
+- **load shedding**: a cap on requests in flight, with a short queue, and a fast `503` beyond it;
+- **a rate limit**, global or per client, with `RateLimit-*` headers and `429` + `Retry-After` beyond it;
+- **cancellation** when the client disconnects;
+- **JSON error responses** with the right status for every resilience error raised in your handlers.
+
+Both live in `resilience-pipeline/http` and import no framework. [Fastify](/integrations/fastify/) and [Koa](/integrations/koa/) have their own pages.
+
+<Tabs syncKey="framework">
+<TabItem label="Express">
+```ts
+import express from 'express';
+import { getResilienceSignal } from 'resilience-pipeline';
+import { resilienceMiddleware } from 'resilience-pipeline/http';
+
+const app = express();
+app.use(
+  resilienceMiddleware({
+    timeout: '5s',
+    concurrency: { permitLimit: 200, queueLimit: 100, queueTimeout: '1s' },
+    rateLimit: { key: (req) => req.ip, permitLimit: 100, window: '1m' },
+  }),
+);
+
+app.get('/orders/:id', async (req, res, next) => {
+  try {
+    // Aborted when the 5 s budget runs out or the client goes away.
+    const order = await db.orders.find(req.params.id, { signal: getResilienceSignal() });
+    res.json(order);
+  } catch (error) {
+    next(error);
+  }
+});
+```
+</TabItem>
+<TabItem label="Hono">
+```ts
+import { Hono } from 'hono';
+import { getResilienceSignal } from 'resilience-pipeline';
+import { honoResilience } from 'resilience-pipeline/http';
+
+const app = new Hono();
+app.use(
+  honoResilience({
+    timeout: '5s',
+    concurrency: { permitLimit: 200, queueLimit: 100, queueTimeout: '1s' },
+    rateLimit: { key: (c) => c.req.header('x-api-key') ?? 'anonymous', permitLimit: 100, window: '1m' },
+  }),
+);
+
+app.get('/orders/:id', async (c) => {
+  const order = await db.orders.find(c.req.param('id'), { signal: getResilienceSignal() });
+  return c.json(order);
+});
+```
+</TabItem>
+</Tabs>
+
+Register the middleware first, before routers and body parsers, so the deadline and the limits cover all the work.
+
+## What a request goes through
+
+```
+rate limit (if set) → concurrency limit (if set) → timeout (if set) → your handlers
+```
+
+The rate limit is checked first, so a client over its quota never takes a concurrency slot. The timeout starts once the request has a slot: time spent in the queue is bounded by `queueTimeout`, not by `timeout`.
+
+## Options (`InboundOptions`)
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `timeout` | `Duration` | none | Budget per request. Everything called through a pipeline while handling it inherits the deadline. |
+| `concurrency.permitLimit` | `number` | required | Max requests in flight. |
+| `concurrency.queueLimit` | `number` | `0` | Requests that may wait for a slot. Beyond it: `503`. |
+| `concurrency.queueTimeout` | `Duration` | no limit | Longest a request waits in the queue before a `503`. |
+| `rateLimit.permitLimit` | `number` | required | Requests allowed per window. |
+| `rateLimit.window` | `Duration` | required | Window length, e.g. `'1m'`. |
+| `rateLimit.key` | `(req) => string` | none (one limit for all) | Partition key. Receives Express's `req` or Hono's `c`. |
+| `rateLimit.segmentsPerWindow` | `number` | `10` | Segments the sliding window moves by. `1` is a fixed window. |
+| `rateLimit.maxPartitions` | `number` | `100000` | Most keys tracked; the least recently used idle key is dropped beyond it. |
+| `rateLimitHeaders` | `'draft'` \| `'legacy'` \| `'both'` \| `false` | `'draft'` | `RateLimit-Limit/-Remaining/-Reset`, `X-RateLimit-*`, both, or none. `Reset` is in seconds from now. |
+| `pipeline` | `ResiliencePipeline` | built from the options above | Your own pipeline; the other options are then ignored. |
+
+Rate-limit headers are only sent when the pipeline has a rate limiter.
+
+## Behaviour
+
+- **Deadline propagation.** Your handlers run inside the middleware's execution (through `AsyncLocalStorage`). Any pipeline executed underneath, such as a [resilient fetch](/integrations/fetch/), a database pipeline or a NestJS service, links its signal to the request's. When the budget runs out they are all aborted. `getResilienceSignal()` returns the request's signal anywhere in the call.
+- **Timeout response.** When `timeout` passes and nothing was sent yet, the client gets `504`. Your handler keeps running until its own awaits notice the aborted signal, so check `res.headersSent` before writing late.
+- **Client disconnect.** When the connection closes before the response finished, the signal aborts with `Client disconnected` and nothing is sent.
+- **When the slot is freed.** Express holds the concurrency slot until the response finishes or the connection closes. Hono holds it until the handler chain returns.
+- **Other errors.** Errors that aren't resilience errors are left to the framework: Express gets them through `next(error)` as usual, Hono's middleware rethrows them.
+
+The response body is always JSON:
+
+```json
+{ "statusCode": 429, "error": "RateLimiterRejectedError", "message": "The operation could not be executed due to rate limiting. Retry after 2400ms." }
+```
+
+with a `Retry-After` header (seconds, rounded up) when the error knows when to retry: rate limits and open circuits.
+
+The middleware only answers for its own rejections. A resilience error raised **inside your handler** (an open circuit or a timeout of a downstream call) goes to the framework's error handling like any other error. One exception: when the **request's own `timeout`** fires, nested pipelines rethrow that same `TimeoutRejectedError`, and Hono (like Fastify and Koa) still answers 504 for it. In Express the handler runs outside the middleware, so that error reaches your error handler; mapping it as below gives the same 504. Map it there:
+
+<Tabs syncKey="framework">
+<TabItem label="Express">
+```ts
+import { describeResilienceError } from 'resilience-pipeline/http';
+
+// After your routes.
+app.use((error, req, res, next) => {
+  const d = describeResilienceError(error);
+  if (!d || res.headersSent) return next(error);
+  if (d.retryAfter !== undefined) res.set('retry-after', String(d.retryAfter));
+  res.status(d.httpStatus).json({ code: d.code, message: d.message });
+});
+```
+</TabItem>
+<TabItem label="Hono">
+```ts
+import { describeResilienceError } from 'resilience-pipeline/http';
+
+app.onError((error, c) => {
+  const d = describeResilienceError(error);
+  if (!d) return c.json({ message: 'Internal Server Error' }, 500);
+  if (d.retryAfter !== undefined) c.header('retry-after', String(d.retryAfter));
+  return c.json({ code: d.code, message: d.message }, d.httpStatus as 503);
+});
+```
+</TabItem>
+</Tabs>
+
+## Status mapping
+
+`describeResilienceError(error)` and `httpStatusFor(error)` map an error by its `code`, not by `instanceof`, so they work across duplicate copies of the package.
+
+| `code` | Error | HTTP | Why |
+|---|---|---|---|
+| `TIMEOUT` | `TimeoutRejectedError` | `504` | The work didn't finish in its budget. |
+| `RATE_LIMITED` | `RateLimiterRejectedError` | `429` | The caller is over its rate. |
+| `PERMIT_LIMIT_EXCEEDED` | `PermitLimitExceededError` | `429` | One execution asked for more permits than the limit holds. |
+| `RATE_LIMIT_DENIED` | `RateLimiterDeniedError` | `403` | Refused by the limiter's `deny` rule. |
+| `BULKHEAD_FULL` | `BulkheadRejectedError` | `503` | Our capacity is full, not the client's fault. |
+| `CIRCUIT_OPEN` | `BrokenCircuitError` | `503` | A dependency is failing. |
+| `CIRCUIT_ISOLATED` | `IsolatedCircuitError` | `503` | A circuit is held open by hand. |
+| `LOCK_NOT_ACQUIRED` | `LockNotAcquiredError` | `409` | Someone else holds the lock. |
+| any other resilience error | | `503` | |
+| not a resilience error | | `undefined` | Leave it to your error handling. |
+
+Full list: [error codes](/reference/error-codes/).
+
+## GraphQL, gRPC, WebSockets
+
+`describeResilienceError()` returns `{ code, httpStatus, retryAfter, message, source }` (`retryAfter` in seconds) and doesn't depend on HTTP. Use it wherever you build an error for a client:
+
+```ts twoslash
+import { describeResilienceError } from 'resilience-pipeline/http';
+declare class GraphQLError extends Error {
+  constructor(message: string, options?: { extensions?: Record<string, unknown> });
+}
+// ---cut---
+// Apollo Server / GraphQL Yoga: formatError, or a resolver wrapper.
+export function toGraphQLError(error: unknown): unknown {
+  const d = describeResilienceError(error);
+  if (!d) return error;
+  return new GraphQLError(d.message, {
+    extensions: { code: d.code, http: { status: d.httpStatus }, retryAfter: d.retryAfter },
+  });
+}
+```
+
+For gRPC, map the code to a status:
+
+| `code` | gRPC status |
+|---|---|
+| `TIMEOUT` | `DEADLINE_EXCEEDED` (4) |
+| `RATE_LIMITED`, `PERMIT_LIMIT_EXCEEDED` | `RESOURCE_EXHAUSTED` (8) |
+| `RATE_LIMIT_DENIED` | `PERMISSION_DENIED` (7) |
+| `BULKHEAD_FULL`, `CIRCUIT_OPEN`, `CIRCUIT_ISOLATED` | `UNAVAILABLE` (14) |
+| `LOCK_NOT_ACQUIRED` | `ABORTED` (10) |
+
+`retryAfterSeconds(error)` is a shortcut for `describeResilienceError(error)?.retryAfter`.
+
+## Your own pipeline
+
+Pass `pipeline` to use any strategies: queue priorities, the [adaptive concurrency limiter](/strategies/adaptive-concurrency/) instead of a fixed limit, a [Redis-backed](/integrations/redis/) rate limit. The inbound request is in `context.properties` under `HTTP_REQUEST`, for partition keys and priorities:
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { HTTP_REQUEST } from 'resilience-pipeline/http';
+
+type Req = { headers: Record<string, string | undefined> };
+const plan = (ctx: { properties: Map<string, unknown> }) => (ctx.properties.get(HTTP_REQUEST) as Req).headers['x-plan'];
+
+const inbound = new ResiliencePipelineBuilder({ name: 'inbound' })
+  .addConcurrencyLimiter({
+    permitLimit: 100,
+    queueLimit: 200,
+    queueTimeout: '500ms',
+    priority: (ctx) => (plan(ctx) === 'paid' ? 0 : 10), // paid requests jump the queue
+  })
+  .addTimeout('5s')
+  .build();
+
+// app.use(resilienceMiddleware({ pipeline: inbound }))
+```
+
+<Aside type="caution" title="Gotchas">
+- **Per-client limits and long windows.** An idle client's partition is dropped after 10 minutes, which resets its count. With a window longer than that, build your own pipeline with `addPartitionedRateLimiter({ idleTimeout })`, or use a [Redis limiter](/integrations/redis/) so the limit also holds across instances.
+- **`req.ip` behind a proxy** is the proxy's address unless Express's `trust proxy` is set. Every client would share one limit.
+- **Hono streaming responses** release the concurrency slot when the handler returns, not when the stream ends.
+</Aside>
+
+## Related
+
+- [Load shedding](/guides/load-shedding/)
+- [Context, signals and deadline propagation](/concepts/context-and-signals/)
+- [Rate limiting](/strategies/rate-limiting/), [Concurrency limiter](/strategies/concurrency-limiter/)
+- [Fastify](/integrations/fastify/), [Koa](/integrations/koa/), [NestJS](/integrations/nestjs/)

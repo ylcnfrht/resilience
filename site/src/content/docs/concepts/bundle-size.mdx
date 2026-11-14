@@ -1,0 +1,79 @@
+---
+title: Bundle size
+description: How resilience-pipeline tree-shakes, what each common setup costs in min+gzip, and how to keep browser bundles small.
+sidebar:
+  order: 6
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every strategy is a separate, side-effect-free module (`"sideEffects": false`). Your bundler includes only the ones
+you import. The one exception is the convenience builder, which references all of them.
+
+## Sizes
+
+Measured min+gzip for the browser with esbuild. Budgets are enforced by `npm run check:size`:
+
+| What you use | Size |
+|---|---|
+| `retry()` one-liner | 4.1 KB |
+| `PipelineBuilder` + retry + timeout | 4.8 KB |
+| `PipelineBuilder` + retry + circuit breaker + timeout | 7.1 KB |
+| `createResilientFetch()` (`/fetch`, per-host breakers) | 9.1 KB |
+| `ResiliencePipelineBuilder` (every strategy) | 15.1 KB |
+
+Per-scenario numbers for more setups are in [Bundle sizes](/reference/bundle-sizes/).
+
+## `PipelineBuilder` instead of `addX()`
+
+`ResiliencePipelineBuilder` has an `addX()` method for every strategy, so importing it pulls in every strategy.
+`PipelineBuilder` has only `add()`; you pass it strategy definitions, and only those are bundled:
+
+```ts twoslash
+import { PipelineBuilder, retryStrategy, circuitBreakerStrategy, timeoutStrategy } from 'resilience-pipeline';
+
+const pipeline = new PipelineBuilder({ name: 'api' })
+  .add(retryStrategy({ maxRetryAttempts: 3, backoffType: 'exponential' }))
+  .add(circuitBreakerStrategy({ consecutiveFailures: 5 }))
+  .add(timeoutStrategy('2s'))
+  .build();
+```
+
+The resulting pipeline is identical, typed errors included. Every `addX()` has an `xStrategy()` counterpart:
+
+| Builder method | Definition |
+|---|---|
+| `addRetry` | `retryStrategy` |
+| `addTimeout` | `timeoutStrategy` |
+| `addCircuitBreaker` | `circuitBreakerStrategy` |
+| `addFallback` / `addFallbackOn` / `addMapError` | `fallbackStrategy` / `fallbackOnStrategy` / `mapErrorStrategy` |
+| `addStaleFallback` | `staleFallbackStrategy` |
+| `addHedging` | `hedgingStrategy` |
+| `addConcurrencyLimiter` | `concurrencyLimiterStrategy` |
+| `addAdaptiveConcurrencyLimiter` | `adaptiveConcurrencyLimiterStrategy` |
+| `addRateLimiter` | `tokenBucketStrategy` |
+| `addFixedWindowRateLimiter` / `addSlidingWindowRateLimiter` | `fixedWindowRateLimiterStrategy` / `slidingWindowRateLimiterStrategy` |
+| `addPartitionedRateLimiter` | `partitionedRateLimiterStrategy` |
+| `addCache` / `addCoalesce` | `cacheStrategy` / `coalesceStrategy` |
+| `addLock` | `lockStrategy` |
+| `addChaosFault` / `addChaosOutcome` / `addChaosLatency` / `addChaosBehavior` | `chaosFaultStrategy` / `chaosOutcomeStrategy` / `chaosLatencyStrategy` / `chaosBehaviorStrategy` |
+
+## Tips
+
+- **One strategy, no pipeline:** `retry()` and `withTimeout()` build their strategy directly, without a builder.
+- **Code that only consumes results** (a UI layer handling `settle()` outcomes): import from
+  `resilience-pipeline/outcome`. It has `Outcome`, the error classes and the guards, and no strategy.
+- **Pass predicates as functions** when size matters. `PredicateBuilder` is only bundled if you use it.
+- **Circuit breaker extensions** (`circuitHealthCheck`, `sharedCircuitState`) are separate modules, bundled only
+  when you pass them in `extensions`.
+- **Integrations live in subpaths** (`/fetch`, `/otel`, `/nestjs`…). The main entry never imports framework code.
+
+<Aside type="tip">
+Server code rarely needs to care: 15.1 KB is negligible next to a Node `node_modules`. Use `ResiliencePipelineBuilder`
+there for its shorter syntax, and `PipelineBuilder` in browser and edge bundles.
+</Aside>
+
+## Related
+
+- [Pipelines and strategy order](/concepts/pipelines/)
+- [Installation: entry points](/start/installation/#entry-points)

@@ -1,0 +1,109 @@
+---
+title: Batcher
+description: Merge many single-item loads into one batched call (DataLoader-style), with key dedupe, per-item errors and a resilience pipeline per batch.
+sidebar:
+  order: 13
+---
+import BatcherTimeline from '../../../components/BatcherTimeline.tsx';
+
+import { Aside } from '@astrojs/starlight/components';
+
+`createBatcher` collects single-item `load()` calls for a few milliseconds and sends them as one batched request: 100 `getUser(id)` calls become one `SELECT ... WHERE id IN (...)`. It is DataLoader's (and bottleneck's `Batcher`) idea, with two additions: each batch runs through a resilience pipeline as a unit, and cancellation works per caller. Use it to fix N+1 queries in GraphQL resolvers or fan-out code, or to fit a bulk API. Don't use it when calls are rare (each one waits up to `maxWait` for company), or when the backend has no batch endpoint.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, createBatcher } from 'resilience-pipeline';
+interface User { id: string; name: string }
+declare const db: { usersByIds(ids: string[], options: { signal: AbortSignal }): Promise<User[]> };
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder().addRetry({ maxRetryAttempts: 2 }).addTimeout('1s').build();
+
+const users = createBatcher({
+  maxSize: 100,
+  maxWait: '5ms',
+  key: (id: string) => id,
+  pipeline,
+  run: async (ids, { signal }) => {
+    const rows = await db.usersByIds(ids, { signal });
+    return new Map(rows.map((u) => [u.id, u]));
+  },
+});
+
+// Three loads, two distinct ids: one query for ['1', '2'].
+const [a, b, c] = await Promise.all([users.load('1'), users.load('2'), users.load('1')]);
+```
+
+## How it works
+
+<BatcherTimeline client:visible />
+
+1. The first `load()` of a batch starts a `maxWait` timer.
+2. Each `load()` adds its item to the pending batch. With `key`, items with the same key share one slot and one result.
+3. The batch is sent when it holds `maxSize` distinct items, or when the timer fires, whichever comes first. The next `load()` starts a new batch.
+4. `run(items, context)` is executed **once per batch** through `pipeline`: retried, timed out and rate limited as a unit.
+5. Results are routed back to each caller.
+
+## What `run` returns
+
+| Return | Matching | Missing result |
+|---|---|---|
+| An array | One result per item, **in the order of `items`** | A length mismatch rejects every item of the batch. |
+| A `Map` (needs `key`) | By key | That item rejects with `Batcher: no result for key ...`. |
+
+Either way, a result that is an `Error` instance rejects only that item; the others resolve. If `run` throws (after the pipeline's retries), every item of the batch rejects with that error.
+
+```ts twoslash
+import { createBatcher } from 'resilience-pipeline';
+interface Price { sku: string; amount: number }
+declare function priceApi(skus: string[], signal: AbortSignal): Promise<Array<Price | null>>;
+// ---cut---
+const prices = createBatcher({
+  maxSize: 50,
+  maxWait: '10ms',
+  run: async (skus: string[], { signal }) => {
+    const found = await priceApi(skus, signal); // same order as skus, null when unknown
+    return found.map((p, i) => p ?? new Error(`unknown sku ${skus[i]}`));
+  },
+});
+
+const price = await prices.load('sku-1'); // rejects only if this sku is unknown
+```
+
+Without `key`, every `load()` gets its own slot, even for equal items.
+
+## Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `maxSize` | `number` | required | Send the batch as soon as it holds this many distinct items. Positive integer. |
+| `maxWait` | `Duration` | required | Send the batch this long after its first item arrived. A few ms is typical: it is added to the latency of the first caller. |
+| `run` | `(items, context) => Promise<Array<R \| Error> \| Map<string, R \| Error>>` | required | Loads a batch. Gets the pipeline's context: pass `context.signal` to your I/O. |
+| `key` | `(item) => string` | – | Dedupe: items with the same key share one slot and one result. Required when `run` returns a `Map`. |
+| `pipeline` | `ResiliencePipeline` | the empty pipeline | Each batch runs through it as a unit. |
+| `timeProvider` | `TimeProvider` | system clock | Clock for `maxWait`, e.g. `FakeTimeProvider` in tests. |
+
+`load(item, { signal? })` returns a promise of that item's result.
+
+## Cancellation
+
+A batch is shared by many callers, so one caller can't cancel it for the others.
+
+- **Before the batch is sent**, aborting a caller's `signal` rejects that `load()` with the abort reason and removes its item, unless another caller is waiting on the same key.
+- **After the batch is sent**, aborting rejects that caller's `load()` only. The batch keeps running for everyone else.
+- **Default signal.** Without `signal`, `load()` uses the signal of the pipeline execution it is called from (the ambient context), if any. So a `load()` inside `pipeline.execute()` gives up when that execution times out.
+- **The batch has its own signal.** `run` doesn't run inside the execution that happened to trigger the flush, so that caller's deadline doesn't cancel the batch. Put a timeout in the batcher's own `pipeline`.
+
+<Aside type="caution" title="Error values are failures">
+Any `Error` instance in the results is treated as a failure for that item. If `Error` objects are legitimate values of your data, wrap them.
+</Aside>
+
+## Pitfalls
+
+- **Batch size limits.** Set `maxSize` at or below what the backend accepts in one request (`IN (...)` limits, bulk API maximums).
+- **Order.** An array result must follow the order of `items`, not the order the backend chose. Return a `Map` when the backend reorders or skips rows.
+- **No caching.** A batcher only merges concurrent loads. Put a [cache](/strategies/cache/) in front for repeat reads across time.
+
+## Related
+
+- [Batches and waitFor](/strategies/batches/): run many independent calls with a concurrency cap.
+- [Cache and coalesce](/strategies/cache/): merge concurrent calls for the *same* key.
+- [Context and signals](/concepts/context-and-signals/)

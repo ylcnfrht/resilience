@@ -1,0 +1,12 @@
+.rp-backoff-fig { margin: 0; }
+.rp-backoff-fig svg { width: 100%; height: auto; display: block; }
+.rp-backoff-fig figcaption { font-size: 0.75rem; color: var(--d-muted); margin-top: 0.25rem; }
+.rp-backoff .rp-grid { stroke: var(--sl-color-gray-5); stroke-width: 1; stroke-dasharray: 2 4; }
+.rp-backoff .rp-axis { fill: var(--sl-color-gray-3); font-size: 11px; font-family: var(--sl-font-mono); }
+.rp-backoff .rp-bar { fill: color-mix(in srgb, var(--rp-blue) 55%, transparent); stroke: var(--rp-blue); stroke-width: 1; transition: y 0.25s ease, height 0.25s ease; }
+.rp-backoff .rp-dot { fill: var(--rp-amber); opacity: 0.55; }
+.rp-backoff-foot { justify-content: space-between; margin-top: 0.5rem; }
+.rp-backoff-total { margin: 0; }
+.rp-backoff-total b { font-family: var(--sl-font-mono); color: var(--sl-color-white); }
+.rp-backoff-code { display: block; margin-top: 0.6rem; font-size: 0.75rem; overflow-x: auto; white-space: pre; padding: 0.4rem 0.6rem; border-radius: 6px; background: var(--sl-color-black); }
+@media (prefers-reduced-motion: reduce) { .rp-backoff .rp-bar { transition: none; } }

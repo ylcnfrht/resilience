@@ -1,0 +1,143 @@
+---
+title: What counts as a failure
+description: The default shouldHandle predicates, why 4xx errors, aborts and rejections are skipped, and how to customise them with PredicateBuilder and NonRetryableError.
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every reactive strategy (retry, circuit breaker, hedging, fallback) asks one question about each outcome: *is this a
+failure I should handle?* The answer comes from its `shouldHandle` option. The defaults are deliberately narrow:
+handle transient failures, leave everything else alone.
+
+## The defaults
+
+| Outcome | Retry, circuit breaker, hedging | Fallback |
+|---|---|---|
+| Errors: network errors, 5xx, timeouts, 408, 429 | handled | handled |
+| Client errors: 4xx except 408/429 | not handled | not handled |
+| Rejections: open circuit, full limiter, lock held | not handled | **handled** |
+| Aborts (the caller went away) | not handled | not handled |
+| Successful results, whatever their value | not handled | not handled |
+
+The reasoning behind each row:
+
+- **Client errors.** A 400 or 404 means the request is wrong, not that the dependency is down. Retrying won't help,
+  and counting it would let bad input open the breaker. 408 and 429 are the dependency pushing back, so they behave
+  like 5xx.
+- **Rejections.** The call never started, so it says nothing about the dependency. A breaker that counted its own
+  `CIRCUIT_OPEN` rejections would never close. Fallback *does* handle them: serving a cached value when the circuit
+  is open is its main job.
+- **Aborts.** Nobody is waiting for the answer. A timeout is not a caller abort, though: a `TimeoutRejectedError`
+  is handled like any other transient error.
+- **Results.** A resolved promise is a success unless you say otherwise with `handleResult`.
+
+### How errors are classified
+
+| Check | Rule | Exported as |
+|---|---|---|
+| Client error | A numeric `status`, `statusCode` or `response.status` in 400–499, except 408 and 429 | `isClientError(e)` |
+| Rejection | Raised by a strategy that refused to start the call (`CallRejectedError` subclasses) | `isRejection(e)` |
+| Abort | `error.name === 'AbortError'`, or any error once the caller aborted the execution's signal | `isAbortError(e)` (name check only) |
+
+The status check is duck-typed, so it works with fetch wrappers, axios errors, and the AWS and Google SDKs. Throw your
+own error with a `status` property and the defaults apply:
+
+```ts twoslash
+import { retry } from 'resilience-pipeline';
+// ---cut---
+class HttpError extends Error {
+  constructor(readonly status: number) {
+    super(`HTTP ${status}`);
+  }
+}
+
+await retry(async ({ signal }) => {
+  const res = await fetch('https://api.example.com/items', { signal });
+  if (!res.ok) throw new HttpError(res.status); // 503: retried. 404: thrown at once.
+  return res.json();
+});
+```
+
+## Two rules that hold regardless
+
+- **Retry never retries an open circuit** (`CIRCUIT_OPEN` / `CIRCUIT_ISOLATED`), whatever `shouldHandle` says.
+- **A circuit breaker never counts rejections**, and an error it doesn't handle is neither a failure nor a success.
+  Only a handled outcome counts as a failure; only an unhandled *successful* outcome counts as a success.
+
+## Custom predicates
+
+`shouldHandle` takes a function or a `PredicateBuilder`. **It replaces the default**, so your predicate decides
+alone about aborts and client errors too.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, PredicateBuilder } from 'resilience-pipeline';
+class DbError extends Error {
+  constructor(readonly code: string) { super(code); }
+}
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder<Response>()
+  .addRetry({
+    shouldHandle: new PredicateBuilder<Response>()
+      .handle(TypeError)                                   // fetch network errors
+      .handle(DbError, (e) => e.code === '40001')          // only this subtype
+      .handleInner(DbError)                                // or anywhere in the `cause` chain
+      .handleResult((r) => r.status >= 500 || r.status === 429),
+  })
+  .build();
+```
+
+| Method | Matches |
+|---|---|
+| `handle(Type, predicate?)` | The error is an instance of `Type` (and `predicate` returns true) |
+| `handleInner(Type, predicate?)` | The error or any error in its `cause` chain (10 levels deep) is a `Type` |
+| `handleResult(predicate)` | A successful result for which `predicate` returns true |
+
+The clauses are OR-ed. A function predicate receives `{ outcome, context }` (retry adds `attemptNumber`) and may be
+async. To extend the default instead of replacing it, call it:
+
+```ts twoslash
+import { ResiliencePipelineBuilder, defaultShouldHandle } from 'resilience-pipeline';
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder<Response>()
+  .addRetry({
+    shouldHandle: (args) => defaultShouldHandle(args) || (args.outcome.ok && args.outcome.result.status >= 500),
+  })
+  .build();
+```
+
+`defaultFallbackShouldHandle` is the fallback's default, exported the same way.
+
+## Handled results
+
+When the last attempt still produces a handled *result* (say, a 503 `Response`), retry returns that result. It
+doesn't throw. Check the status after `execute()`, or throw inside the callback as in the `HttpError` example above.
+
+## Stopping retries: `NonRetryableError`
+
+Throw `NonRetryableError` from the callback to stop retrying immediately. The pipeline unwraps it, so the caller
+receives the original error:
+
+```ts twoslash
+import { retry, NonRetryableError } from 'resilience-pipeline';
+declare function charge(): Promise<{ declined: boolean; reason: string }>;
+// ---cut---
+await retry(async () => {
+  const result = await charge();
+  if (result.declined) throw new NonRetryableError(result.reason); // the caller gets Error(reason)
+  return result;
+});
+```
+
+<Aside type="caution">
+`NonRetryableError` only stops retry. Inside the pipeline it is still an error without a `status`, so a circuit
+breaker with the default predicate counts it as a failure. If the cause is a client error, give the breaker its own
+`shouldHandle`.
+</Aside>
+
+## Related
+
+- [Retry](/strategies/retry/), [Circuit breaker](/strategies/circuit-breaker/), [Fallback](/strategies/fallback/)
+- [Typed errors](/concepts/typed-errors/): what the caller sees after the pipeline gives up
+- [Error codes](/reference/error-codes/)

@@ -1,0 +1,130 @@
+---
+title: Telemetry
+description: One event stream for every pipeline — onTelemetry, diagnostics_channel, instrument() hooks and the per-execution events that metrics and tracing adapters build on.
+sidebar:
+  order: 5
+---
+
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Strategies report what they do as **events**: `OnRetry`, `OnCircuitOpened`, `OnTimeout`… Every event from every
+pipeline in the process goes to one stream. The OpenTelemetry, Prometheus, stats and Hystrix integrations are
+consumers of that stream; you can write your own in a few lines.
+
+## Events
+
+```ts twoslash
+import { onTelemetry } from 'resilience-pipeline';
+
+const unsubscribe = onTelemetry(({ event, source, context, args }) => {
+  if (event === 'OnCircuitOpened') {
+    console.warn(`${source.pipelineName}/${source.strategyName} opened`, context.operationKey, args);
+  }
+});
+```
+
+Each `TelemetryEvent` has:
+
+| Field | Content |
+|---|---|
+| `event` | Event name, Polly-style: `OnRetry`, `OnTimeout`, `Chaos.OnFault`… |
+| `source` | `{ pipelineName, strategyName, tags? }` |
+| `context` | The execution's `ResilienceContext` |
+| `args` | Event-specific payload, the same object the matching `on*` callback receives |
+
+`onTelemetry` works in every runtime. On runtimes with `node:diagnostics_channel` (Node, Bun, Deno), the same
+events are also published on the `resilience-pipeline` channel (`TELEMETRY_CHANNEL`):
+
+```ts twoslash
+import { subscribe } from 'node:diagnostics_channel';
+import { TELEMETRY_CHANNEL, type TelemetryEvent } from 'resilience-pipeline';
+
+subscribe(TELEMETRY_CHANNEL, (message) => {
+  const { event, source } = message as TelemetryEvent;
+  console.log(source.pipelineName, source.strategyName, event);
+});
+```
+
+Subscribers on the channel see events from every copy of the package in the process, while `onTelemetry` only sees
+events from the copy it was imported from. In tests, `await nextTelemetry((e) => e.event === 'OnCircuitOpened')` resolves with the next matching event.
+
+### Per-execution events
+
+Four events fire on every execution, whatever strategies it has. Metrics adapters turn them into latency histograms
+and error rates.
+
+| Event | When | `args` |
+|---|---|---|
+| `OnPipelineExecuting` | A call starts, before any strategy | `{ context }` |
+| `OnExecutionAttempt` | Each call of your callback (first attempt, retries, hedges) | `{ outcome, context, attemptNumber, duration }` |
+| `OnStrategyExecuted` | Each strategy finishes, `source.strategyName` set | `{ outcome, duration, context }` |
+| `OnPipelineExecuted` | The call ends | `{ outcome, duration }` |
+
+With no listener and no channel subscriber, nothing is published and per-strategy timing isn't measured. An `onTelemetry` listener that throws is ignored: it never fails or retries the call it observes.
+
+### Strategy events
+
+| Strategy | Events |
+|---|---|
+| Retry | `OnRetry`, `OnRetryExhausted`, `OnRetryBudgetExhausted` |
+| Timeout | `OnTimeout` |
+| Circuit breaker | `OnCircuitOpened`, `OnCircuitClosed`, `OnCircuitHalfOpened`, `OnCircuitRejected`, `OnHalfOpenProbeTimedOut` |
+| Breaker extensions | `OnHealthCheckFailed`, `OnCircuitStateSynced`, `OnCircuitStoreError` |
+| Fallback | `OnFallback` |
+| Hedging | `OnHedging` |
+| Limiters | `OnRateLimiterRejected`, `OnRateLimiterInsuranceUsed`, `OnLimitChanged` (adaptive) |
+| Cache | `OnCacheHit`, `OnCacheMiss`, `OnCoalesced`, `OnStaleServed`, `OnCacheStoreFailed` |
+| Lock | `OnLockRejected`, `OnLockLost` |
+| Chaos | `Chaos.OnFault`, `Chaos.OnOutcome`, `Chaos.OnLatency`, `Chaos.OnBehavior`, `Chaos.OnGlobal` |
+
+Payloads are listed in the [events reference](/reference/events/).
+
+## Callbacks or events?
+
+`onRetry`, `onOpened` and the other `on*` options belong to one strategy instance: use them for behaviour (persist
+breaker state, refresh a token). Events are global and read-only: use them for logs, metrics and traces.
+
+## `instrument()`: wrap executions and attempts
+
+Events report what happened. `instrument()` wraps the work itself, which tracing needs: a span must be *active* while
+your callback runs so your own spans nest under it.
+
+```ts twoslash
+import { instrument } from 'resilience-pipeline';
+// ---cut---
+const remove = instrument({
+  execution: async (info, run) => {
+    const started = performance.now();
+    try {
+      return await run();
+    } finally {
+      console.log(info.context.operationName ?? info.source.pipelineName, performance.now() - started);
+    }
+  },
+  attempt: (info, run) => run(), // around each call of your callback; info.context.attemptNumber
+});
+```
+
+- Each hook must call `run()` exactly once and return its result.
+- The first registered instrumentation is the outermost. A pipeline's own `instrumentation` option runs innermost.
+- `instrumentation: false` on a builder opts that pipeline out of every hook, global ones included.
+
+## Labels and opt-out
+
+| Setting | Where | Effect |
+|---|---|---|
+| `tags: { team: 'billing' }` | Builder | Added to `source.tags` of every event of the pipeline |
+| `name: 'GET /orders'` | `execute()` options | `context.operationName`, used as the span name |
+| `attributes: { tenant: 'acme' }` | `execute()` options | Extra span and OpenTelemetry metric attributes for that call |
+| `telemetry: false` | Builder | The pipeline emits no events at all |
+
+Custom strategies emit their own events with `report(source, 'OnMyEvent', context, args)`.
+
+## Integrations
+
+<CardGrid>
+  <LinkCard title="OpenTelemetry" href="/integrations/opentelemetry/" description="Spans per execution and attempt, duration histograms, breaker state gauge." />
+  <LinkCard title="Prometheus" href="/integrations/prometheus/" description="The same metrics for prom-client." />
+  <LinkCard title="createStats" href="/integrations/stats/" description="In-process counts and p50/p90/p99, no backend needed." />
+  <LinkCard title="Hystrix dashboard" href="/integrations/hystrix/" description="A Hystrix-compatible event stream." />
+</CardGrid>

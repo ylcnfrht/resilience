@@ -1,0 +1,59 @@
+---
+title: Koa
+description: Koa middleware for request deadlines that propagate to nested calls, load shedding, per-client rate limits and 504/503/429 responses.
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`koaResilience` gives every request the same inbound protection as the [Express and Hono middleware](/integrations/express-and-hono/): a deadline that propagates to every pipeline called underneath, load shedding, a rate limit with `RateLimit-*` headers, cancellation on client disconnect, and JSON `504`/`503`/`429`/`409`/`403` responses.
+
+```sh
+npm i resilience-pipeline koa   # koa >= 2 (optional peer dependency)
+```
+
+```ts
+import Koa from 'koa';
+import { getResilienceSignal } from 'resilience-pipeline';
+import { koaResilience } from 'resilience-pipeline/koa';
+
+const app = new Koa();
+
+// First middleware, so the deadline and limits cover everything after it.
+app.use(
+  koaResilience({
+    timeout: '5s',
+    concurrency: { permitLimit: 200, queueLimit: 100, queueTimeout: '1s' },
+    rateLimit: { key: (ctx) => ctx.ip, permitLimit: 100, window: '1m' },
+  }),
+);
+
+app.use(async (ctx) => {
+  // Aborted when the 5 s budget runs out or the client disconnects.
+  ctx.body = await db.orders.find(ctx.path.slice(1), { signal: getResilienceSignal() });
+});
+
+app.listen(3000);
+```
+
+## Options
+
+`koaResilience(options)` takes `InboundOptions`: `timeout`, `concurrency`, `rateLimit`, `rateLimitHeaders`, `pipeline`. See the [options table](/integrations/express-and-hono/#options-inboundoptions). `rateLimit.key` receives Koa's `ctx`.
+
+## Behaviour
+
+- Rate-limit headers are set with `ctx.set()` before `next()` runs, so they are on every response.
+- The rest of the middleware chain runs inside the pipeline. The middleware only answers for its own rejections: any error thrown by a downstream middleware or handler, including a resilience error of a nested pipeline (an open circuit, a lock held, a timeout of a nested call), is rethrown unchanged to Koa's error handling, as in Express and Fastify. Map it there with `describeResilienceError` if you want the same JSON.
+- On a rejection, the middleware sets `ctx.status`, the headers (`Retry-After` when known) and `ctx.body = { statusCode, error, message }`.
+- When the client disconnects before the response finished, the signal aborts with `Client disconnected`.
+
+<Aside type="caution">
+The concurrency slot is released when the downstream middleware chain resolves. If you set `ctx.body` to a stream, the stream keeps flowing after that, outside the limit and the timeout.
+</Aside>
+
+## Related
+
+- [Express and Hono](/integrations/express-and-hono/): options table, status mapping, GraphQL/gRPC.
+- [Fastify](/integrations/fastify/)
+- [Load shedding](/guides/load-shedding/)

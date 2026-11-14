@@ -1,0 +1,182 @@
+---
+title: Timeout
+description: Give up on slow calls, abort their signal and fail with TimeoutRejectedError. Per attempt or for the whole execution.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+Timeout stops waiting for a call that takes too long. It aborts `context.signal`, so `fetch` and other signal-aware I/O stop too, and fails with `TimeoutRejectedError`.
+
+Use it on every call to a remote dependency: without one, a hung connection holds a request, a socket and memory forever. A timeout only frees the **caller**. If your I/O ignores the signal (most SQL drivers), the work keeps running on the other side; see [Databases](/guides/databases/).
+
+## Example
+
+<Tabs syncKey="builder">
+<TabItem label="ResiliencePipelineBuilder">
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder().addTimeout('2s').build();
+
+// Pass the signal on, or the timeout can't cancel the request.
+const res = await pipeline.execute(({ signal }) => fetch('https://api.example.com/orders', { signal }));
+```
+
+</TabItem>
+<TabItem label="PipelineBuilder (smallest bundle)">
+
+```ts twoslash
+import { PipelineBuilder, timeoutStrategy } from 'resilience-pipeline';
+
+const pipeline = new PipelineBuilder().add(timeoutStrategy('2s')).build();
+
+const res = await pipeline.execute(({ signal }) => fetch('https://api.example.com/orders', { signal }));
+```
+
+</TabItem>
+<TabItem label="withTimeout() one-off">
+
+```ts twoslash
+import { withTimeout } from 'resilience-pipeline';
+
+const res = await withTimeout(({ signal }) => fetch('https://api.example.com/orders', { signal }), '2s');
+```
+
+`withTimeout(fn, timeout, { signal?, timeProvider? })`. The second argument is a duration or the full options object.
+
+</TabItem>
+</Tabs>
+
+`addTimeout` accepts a number of milliseconds, a duration string, or options: `addTimeout({ timeout: '2s', onTimeout })`.
+
+## How it works
+
+1. The strategy computes the timeout (`timeoutGenerator`, else `timeout`) and starts a timer.
+2. The callback receives a new signal linked to the caller's: it aborts when the caller aborts **or** when the timer fires.
+3. When the timer fires, the signal is aborted with the `TimeoutRejectedError` as its `reason`, `onTimeout` runs, and the execution fails with that error.
+
+What happens to a callback that is still running depends on the mode:
+
+| Mode | When the time is up | Polly v8 equivalent |
+|---|---|---|
+| Aggressive (default) | Returns `TimeoutRejectedError` **at once**, even if the callback ignores the signal. The callback may keep running in the background; its result is discarded. | none (Polly's pessimistic mode is close) |
+| `cooperative: true` | Aborts the signal, then **waits** for the callback to settle, so no work outlives the timeout. A callback that ignores the signal delays the error until it finishes. | `TimeoutStrategy` |
+| `cooperative: true, keepLateResult: true` | As cooperative, but if the callback still **succeeds** after the deadline, that result is returned instead of the error. | none |
+
+If the **caller** aborts (not the timer), the timeout strategy returns the callback's outcome unchanged; no timeout error is raised and `onTimeout` is not called.
+
+```ts twoslash
+declare function runReport(signal: AbortSignal): Promise<string>;
+// ---cut---
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+// Wait for the report job to stop before failing, and keep its result if it finishes anyway.
+const pipeline = new ResiliencePipelineBuilder<string>()
+  .addTimeout({ timeout: '30s', cooperative: true, keepLateResult: true })
+  .build();
+
+const report = await pipeline.execute(({ signal }) => runReport(signal));
+```
+
+## Per attempt or total
+
+Strategies run in the order they're added; the first is the outermost. The position of the timeout decides what it limits:
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+// Each attempt gets 2 s; with 3 retries the call can take 4 × 2 s plus delays.
+const perAttempt = new ResiliencePipelineBuilder().addRetry({ maxRetryAttempts: 3 }).addTimeout('2s').build();
+
+// All attempts and delays together get 5 s; the retry wait is cut short too.
+const total = new ResiliencePipelineBuilder().addTimeout('5s').addRetry({ maxRetryAttempts: 3 }).build();
+
+// Both: 10 s overall, 2 s per attempt.
+const both = new ResiliencePipelineBuilder()
+  .addTimeout('10s')
+  .addRetry({ maxRetryAttempts: 3, delay: '200ms' })
+  .addTimeout('2s')
+  .build();
+```
+
+A timed-out attempt is retried by the default retry predicate: a timeout is a transient failure, not a rejection.
+
+A pipeline executed inside another one inherits the outer signal, so an outer timeout also cancels nested calls. See [Context, signals & deadline propagation](/concepts/context-and-signals/).
+
+## Dynamic timeouts
+
+`timeoutGenerator` picks the timeout per execution. It receives `{ context }` and may be async. Returning `0`, a negative number or `Infinity` runs that execution **without** a timeout.
+
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const pipeline = new ResiliencePipelineBuilder()
+  .addTimeout({
+    timeoutGenerator: ({ context }) => (context.operationKey === 'export' ? '2m' : '3s'),
+  })
+  .build();
+
+await pipeline.execute(async () => 'done', { operationKey: 'export' });
+```
+
+## Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `name` | `string` | `'Timeout'` | Strategy name in telemetry and `getStrategy()`. |
+| `timeout` | `Duration` | `30000` (30 s) | Time allowed. Must be > 0. `Infinity` disables the timeout. |
+| `timeoutGenerator` | `({ context }) => Duration` (or a promise) | none | Per-execution timeout; overrides `timeout`. `≤ 0` or `Infinity` means no timeout. |
+| `onTimeout` | `(args: OnTimeoutArgs) => void` | none | Called when the timeout fires. Gets `context` and `timeout` (ms). May be async; it's awaited before the error is returned. |
+| `cooperative` | `boolean` | `false` | Wait for the callback to settle after aborting it. |
+| `keepLateResult` | `boolean` | `false` | With `cooperative`: return a success that arrives after the deadline. |
+
+`Duration` is milliseconds or a string: `'250ms'`, `'30s'`, `'5m'`, `'1h'`, `'1d'`, `'2w'`.
+
+<Aside type="caution">
+Timeouts longer than `setTimeout`'s limit (2³¹ − 1 ms, about 24.8 days) work too: the timer is chained.
+</Aside>
+
+## Events and errors
+
+| Telemetry event | Callback | Args |
+|---|---|---|
+| `OnTimeout` | `onTimeout` | `{ context, timeout }` |
+
+| Error | `code` | HTTP | Fields |
+|---|---|---|---|
+| `TimeoutRejectedError` | `TIMEOUT` | 504 | `timeout` (ms), `source` (`{ pipelineName, strategyName }`) |
+
+Check for it with `isTimeoutError(error)`; it works across duplicate copies of the package, unlike `instanceof`. Adding a timeout adds `TimeoutRejectedError` to the pipeline's [typed error](/concepts/typed-errors/) union, so `Outcome.match` needs a `TIMEOUT` branch.
+
+The same error object is the abort `reason` of the callback's signal, so code deep inside the call can tell a timeout from a caller cancel:
+
+```ts twoslash
+import { ResiliencePipelineBuilder, isTimeoutError } from 'resilience-pipeline';
+const pipeline = new ResiliencePipelineBuilder().addTimeout('1s').build();
+// ---cut---
+await pipeline.execute(async ({ signal }) => {
+  signal.addEventListener('abort', () => {
+    if (isTimeoutError(signal.reason)) console.warn('gave up after', signal.reason.timeout, 'ms');
+  });
+});
+```
+
+## Common mistakes
+
+<Aside type="tip" title="Pass the signal">
+`pipeline.execute(() => fetch(url))` times out for the caller but leaves the request running. Always use `({ signal }) => fetch(url, { signal })`, or `getResilienceSignal()` deep in your code.
+</Aside>
+
+- **Timeout outside retry when you meant per attempt.** One slow attempt then eats the whole budget and nothing is retried.
+- **`cooperative` with I/O that ignores the signal.** The caller waits as long as without a timeout. Keep the default mode there.
+- **Expecting a circuit breaker to ignore timeouts.** It counts them as failures, which is usually what you want.
+
+## Related
+
+- [Retry](/strategies/retry/)
+- [Hedging](/strategies/hedging/), for slow calls you'd rather race than abandon
+- [Context, signals & deadline propagation](/concepts/context-and-signals/)
+- [Error codes & HTTP mapping](/reference/error-codes/)

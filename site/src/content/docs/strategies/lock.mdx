@@ -1,0 +1,141 @@
+---
+title: Lock
+description: Run a callback under a lease-based mutex with automatic renewal, bounded waiting and fencing tokens, in one process or across many with Redis.
+sidebar:
+  order: 10
+---
+import LockLeaseTimeline from '../../../components/LockLeaseTimeline.tsx';
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+The lock strategy runs a callback only while it holds a lease on a key: a mutex across executions, and across processes with a shared store. Use it for work that must not run twice at the same time: a nightly job on a fleet of instances, a balance update per account, a cache rebuild. It isn't a queue (waiters poll and the order isn't guaranteed), and it isn't for hot paths that need microsecond locking.
+
+<Tabs syncKey="builder">
+<TabItem label="ResiliencePipelineBuilder">
+```ts twoslash
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+declare function buildReport(signal: AbortSignal): Promise<void>;
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder()
+  .addLock({ key: () => 'nightly-report', ttl: '30s' })
+  .build();
+
+await pipeline.execute(({ signal }) => buildReport(signal)); // LockNotAcquiredError if another run holds it
+```
+</TabItem>
+<TabItem label="PipelineBuilder">
+```ts twoslash
+import { PipelineBuilder, lockStrategy } from 'resilience-pipeline';
+
+const pipeline = new PipelineBuilder()
+  .add(lockStrategy({ key: () => 'nightly-report', ttl: '30s' }))
+  .build();
+```
+</TabItem>
+</Tabs>
+
+Without a `store`, the lock only excludes executions in the same process. To lock across instances, pass a distributed store such as `RedisLockStore` from [Redis](/integrations/redis/).
+
+## How it works
+
+<LockLeaseTimeline client:visible />
+
+1. **Acquire.** The strategy asks the store for a lease on `key(context)` for `ttl`, under a random owner id. If someone else holds it, it polls (50 ms, doubling up to 1 s) until `wait` runs out, then fails with `LockNotAcquiredError`. The default `wait` is 0: fail fast.
+2. **Run.** The callback runs with the lease's fencing token in its context (`getLockToken()`).
+3. **Renew.** Every `ttl / 3` the lease is pushed out to `now + ttl`. A failed renewal (store error) is retried while the current lease is still valid.
+4. **Lose.** If the store says the lease belongs to someone else, or it couldn't be renewed before it expired, the callback's signal is aborted with `LockLostError`, `onLockLost` is called, and a failing callback reports `LockLostError`.
+5. **Release.** When the callback ends (success or failure), the lease is released, but only if this owner still holds it. A failed release is ignored; the lease expires anyway.
+
+Why a lease and not a plain lock: a process that crashes while holding a plain lock holds it forever. A lease expires `ttl` after the last renewal. Renewal keeps long jobs alive without a long `ttl`, so a crash frees the key within one `ttl`.
+
+## Fencing tokens
+
+A lease alone is not enough. A process can pause (a GC pause, a VM migration, a slow network) for longer than `ttl`. Its lease expires, another process acquires the lock and writes, and then the first one wakes up and writes too, still believing it holds the lock. Abort signals don't help: the paused process can't see its signal while paused.
+
+The fix is a **fencing token**: a number that increases with every acquisition of a key. Pass it with every write, and let the protected resource reject writes carrying a token lower than one it has already seen.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, getLockToken } from 'resilience-pipeline';
+declare const db: { query(sql: string, params: unknown[]): Promise<{ rowCount: number }> };
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder()
+  .addLock({ key: (ctx) => `account:${ctx.operationKey}`, wait: '5s' })
+  .build();
+
+async function saveBalance(accountId: string, balance: number) {
+  const token = getLockToken(); // reads the ambient context of the running execution
+  const { rowCount } = await db.query(
+    'UPDATE accounts SET balance = $1, fence = $2 WHERE id = $3 AND fence < $2',
+    [balance, token, accountId],
+  );
+  if (rowCount === 0) throw new Error('stale lock holder, write rejected');
+}
+
+await pipeline.execute(() => saveBalance('acc_1', 100), { operationKey: 'acc_1' });
+```
+
+`getLockToken(context?)` returns the token of the innermost lock the code runs under, or `undefined` outside a lock. Without an argument it reads the ambient context, so it works deep inside your call stack. The token is also in `context.properties` under `LOCK_TOKEN`.
+
+## Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `key` | `(context) => string` | required | Lock key for this execution, e.g. `() => 'nightly-report'` or ``(ctx) => `order:${ctx.operationKey}` ``. |
+| `ttl` | `Duration` | `30_000` (30 s) | Lease length, renewed every `ttl / 3` while the callback runs. > 0. |
+| `wait` | `Duration` | `0` (fail fast) | How long to wait for a held lock before failing with `LockNotAcquiredError`. |
+| `store` | `LockStore` | one `MemoryLockStore` per clock, shared by every lock on the pipeline's time provider (so one per process with the system clock, and leases expire on a `FakeTimeProvider` in tests) | Where leases live. Use a distributed store to lock across processes. |
+| `onLockLost` | `(args: { context, key }) => void \| Promise<void>` | – | Called when renewal fails. The callback's signal is then aborted. |
+| `name` | `string` | `'Lock'` | Strategy name. |
+
+## Errors and events
+
+| Error | `code` | HTTP | When |
+|---|---|---|---|
+| `LockNotAcquiredError` | `LOCK_NOT_ACQUIRED` | 409 | The lock stayed held for longer than `wait`. Has `key`. A rejection: `isRejection()` matches, the callback never ran. |
+| `LockLostError` | `LOCK_LOST` | – | The lease was lost while the callback ran, and the callback failed. Has `key`. Also the abort reason of the callback's signal. |
+
+If the callback ignores its signal and still succeeds after the lease was lost, the success is returned. Check `signal.aborted` before committing, or use fencing.
+
+| Telemetry event | Callback | When |
+|---|---|---|
+| `OnLockRejected` | – | `wait` ran out. Args: `{ context, key }`. |
+| `OnLockLost` | `onLockLost` | Renewal failed. Args: `{ context, key }`. |
+
+Aborting the caller's signal while waiting fails with the abort reason; the callback never runs.
+
+## Stores
+
+`MemoryLockStore` excludes executions inside one process. It takes an optional `timeProvider` (for tests). It keeps one token counter per key ever locked, so tokens stay monotonic; that's fine unless your keys are unbounded.
+
+To plug in Redis, Postgres or anything else, implement `LockStore`. Every method must be atomic for its key:
+
+```ts twoslash
+import type { LockStore } from 'resilience-pipeline';
+// ---cut---
+interface MyLockStore extends LockStore {
+  /** No live lease: store { owner, expires: now + ttlMs }, bump the key's fencing token and return it. Else undefined. */
+  acquire(key: string, owner: string, ttlMs: number): Promise<{ fencingToken: number } | undefined>;
+  /** The live lease belongs to `owner`: push its expiry to now + ttlMs and return true. Else false. */
+  renew(key: string, owner: string, ttlMs: number): Promise<boolean>;
+  /** Delete the lease only if it belongs to `owner` (never a lease someone else took after expiry). */
+  release(key: string, owner: string): Promise<void>;
+}
+```
+
+Fencing tokens must only ever increase per key, also across expiry and release. `RedisLockStore` issues them atomically with the lease; a custom `LockStore` must give the same guarantee.
+
+## Pitfalls
+
+<Aside type="caution" title="Not reentrant">
+Each execution acquires under a fresh owner id. A locked callback that runs another execution with the same key (through the same or another pipeline) waits on itself and fails with `LockNotAcquiredError`.
+</Aside>
+
+- **Choose `ttl` by pause length, not job length.** Renewal handles long jobs. `ttl` bounds how long a crashed holder blocks others and how long a paused holder can go unnoticed. A few seconds to a minute is typical.
+- **Pass the signal on.** A lost lease aborts `context.signal`. I/O that ignores it keeps running without the lock.
+- **Waiting is polling.** A release is noticed up to 1 s late. Keep `wait` for occasional contention; for a work queue, use a queue.
+
+## Related
+
+- [Redis](/integrations/redis/): `RedisLockStore` with atomic fencing tokens.
+- [Multi-instance guide](/guides/multi-instance/)
+- [Context and signals](/concepts/context-and-signals/)

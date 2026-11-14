@@ -1,0 +1,128 @@
+---
+title: Batches and waitFor
+description: Run many calls in parallel with per-task resilience and cancellation (all, allSettled, map with a concurrency cap) and poll until a condition holds (waitFor).
+sidebar:
+  order: 12
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`Promise.all` has two problems in resilient code: when one task fails, the others keep running and burn quota for a result nobody will read, and it has no concurrency cap. These helpers fix both. Each task runs through an optional pipeline on its own (its own retries and timeout), receives a context with a signal, and is cancelled when the batch gives up. `waitFor` covers the other common loop: poll until something is ready.
+
+They are plain functions, not pipeline strategies. To merge many *calls* into one request (DataLoader-style), use the [batcher](/strategies/batcher/) instead.
+
+## `all`
+
+Runs tasks in parallel. On the first failure, the others are aborted through their context signal, and `all` rejects with that failure. The result is a typed tuple.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, all } from 'resilience-pipeline';
+interface User { id: string }
+interface Order { total: number }
+declare function getUser(id: string, signal: AbortSignal): Promise<User>;
+declare function getOrders(id: string, signal: AbortSignal): Promise<Order[]>;
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder().addRetry({ maxRetryAttempts: 2 }).addTimeout('2s').build();
+
+const [user, orders] = await all(
+  [({ signal }) => getUser('42', signal), ({ signal }) => getOrders('42', signal)],
+  { pipeline, signal: AbortSignal.timeout(5000) },
+);
+```
+
+## `allSettled`
+
+Runs every task to the end and returns one `Outcome` per task, in order. It never rejects, except when the caller's `signal` aborts (it then rejects with the abort reason once the tasks have settled).
+
+```ts twoslash
+import { allSettled } from 'resilience-pipeline';
+declare function ping(host: string, signal: AbortSignal): Promise<number>;
+// ---cut---
+const outcomes = await allSettled([({ signal }) => ping('eu', signal), ({ signal }) => ping('us', signal)]);
+for (const o of outcomes) console.log(o.ok ? `${o.result} ms` : `down: ${String(o.error)}`);
+```
+
+## `map`
+
+Maps items with at most `concurrency` running at once. Results come back in input order.
+
+```ts twoslash
+import { ResiliencePipelineBuilder, map } from 'resilience-pipeline';
+declare function resize(url: string, signal: AbortSignal): Promise<string>;
+declare const urls: string[];
+// ---cut---
+const pipeline = new ResiliencePipelineBuilder().addRetry().addTimeout('10s').build();
+
+// Stops at the first failure and aborts the items still running.
+const thumbs = await map(urls, (url, _i, { signal }) => resize(url, signal), { concurrency: 8, pipeline });
+
+// Runs every item and reports each one.
+const results = await map(urls, (url, _i, { signal }) => resize(url, signal), { concurrency: 8, stopOnError: false });
+const failed = results.filter((r) => !r.ok).length;
+```
+
+With `stopOnError: false` the return type is `Outcome<R>[]`; otherwise `R[]`.
+
+### Options
+
+`all`, `allSettled` and `map` accept:
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `pipeline` | `ResiliencePipeline` | the empty pipeline | Each task or item runs through it separately (its own retries, timeout, breaker). |
+| `signal` | `AbortSignal` | – | Cancels the batch: running tasks see their signal abort, unstarted items never start, and the call rejects with the abort reason. |
+
+`map` adds:
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `concurrency` | `number` | all items at once | Max items running at once. ≥ 1. |
+| `stopOnError` | `boolean` | `true` | `true`: reject on the first failure and abort the rest. `false`: run every item and return an `Outcome` per item. |
+
+The callback gets `(item, index, context)`. Pass `context.signal` to your I/O, or cancellation can't reach it.
+
+<Aside type="tip">
+Sharing one pipeline across the items also shares its state: one circuit breaker sees every item, and a concurrency limiter in it caps the batch together with every other caller of that pipeline.
+</Aside>
+
+## `waitFor`
+
+Polls `condition` until it returns `true`. Rejects with `TimeoutRejectedError` after `timeout`, or with the error if `condition` throws.
+
+```ts twoslash
+import { waitFor } from 'resilience-pipeline';
+declare const jobId: string;
+// ---cut---
+// Fixed interval.
+await waitFor(async (signal) => (await fetch('http://localhost:8080/health', { signal })).ok, {
+  interval: '500ms',
+  timeout: '30s',
+});
+
+// Backoff: 200 ms, 400 ms, 800 ms, ... capped at 5 s.
+await waitFor(
+  async (signal) => {
+    const job = await fetch(`https://api.example.com/jobs/${jobId}`, { signal }).then((r) => r.json());
+    return job.status === 'done';
+  },
+  { interval: (n) => Math.min(100 * 2 ** n, 5000), timeout: '10m' },
+);
+```
+
+The first check runs immediately. Between checks it pauses `interval`, or `interval(n)` where `n` is 1 before the second check, 2 before the third, and so on. The `backoff` helpers produce such functions (`interval: backoff.exponential({ delay: '100ms', maxDelay: '5s' })`), but they count from 0, so the first pause is their *second* step: 200 ms here, and `backoff.sequence(['100ms', '1s'])` starts at 1 s.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `interval` | `Duration \| (attempt: number) => Duration` | required | Pause between checks: fixed, or per pause. ≥ 0. |
+| `timeout` | `Duration` | required | Give up after this long with `TimeoutRejectedError`. > 0. |
+| `signal` | `AbortSignal` | – | Cancels waiting; rejects with its reason. |
+| `timeProvider` | `TimeProvider` | system clock | Clock for the interval and timeout, e.g. `FakeTimeProvider` in tests. |
+
+`condition` gets a signal that aborts on timeout or cancellation. If it ignores the signal, `waitFor` still stops waiting for it at the deadline. A throwing `condition` ends the wait; to treat errors as "not yet", catch them: `` (signal) => check(signal).catch(() => false) ``.
+
+## Related
+
+- [Batcher](/strategies/batcher/): coalesce many single calls into one batched request.
+- [Concurrency limiter](/strategies/concurrency-limiter/): a shared cap instead of a per-batch one.
+- [Retry](/strategies/retry/): `backoff` helpers.
+- [Context and signals](/concepts/context-and-signals/)

@@ -1,0 +1,63 @@
+---
+title: Introduction
+description: resilience-pipeline composes retry, circuit breaker, timeout, hedging and rate limiting into one typed pipeline for every JavaScript runtime.
+sidebar:
+  order: 1
+---
+
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+resilience-pipeline wraps calls to things that fail: HTTP APIs, databases, queues, LLM providers. You describe how to
+react to failure once, as a **pipeline** of strategies, and run any call through it.
+
+```ts twoslash
+declare function chargeCard(amount: number, signal: AbortSignal): Promise<{ id: string }>;
+// ---cut---
+import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+
+const payments = new ResiliencePipelineBuilder({ name: 'payments' })
+  .addRetry({ maxRetryAttempts: 3, backoffType: 'exponential', useJitter: true })
+  .addCircuitBreaker({ failureRatio: 0.5, minimumThroughput: 20 })
+  .addTimeout('2s')
+  .build();
+
+const receipt = await payments.execute(({ signal }) => chargeCard(4200, signal));
+```
+
+Each attempt gets a 2-second timeout and passes through the circuit breaker. Transient failures are retried with
+exponential backoff; once the breaker opens, calls fail fast instead of piling onto a dead service.
+
+## What you get
+
+| Failure mode | Strategies |
+|---|---|
+| Transient errors | [Retry](/strategies/retry/) with backoff, jitter and a shared retry budget |
+| A dependency that is down | [Circuit breaker](/strategies/circuit-breaker/), [fallback](/strategies/fallback/), stale fallback |
+| Slow calls | [Timeout](/strategies/timeout/), [hedging](/strategies/hedging/), deadline propagation |
+| Overload | [Concurrency limiter](/strategies/concurrency-limiter/), [adaptive concurrency](/strategies/adaptive-concurrency/), [rate limiters](/strategies/rate-limiting/) |
+| Duplicate work | [Cache and coalesce](/strategies/cache/), [batcher](/strategies/batcher/), [lock](/strategies/lock/) |
+| Proving it works | [Chaos](/strategies/chaos/), `FakeTimeProvider`, [telemetry](/concepts/telemetry/) |
+
+The API follows [Polly v8](https://www.pollydocs.org/): `ResiliencePipelineBuilder`, `addRetry`, `shouldHandle`,
+`PredicateBuilder`, the same option and event names. It is an independent TypeScript implementation with no
+runtime dependencies. It runs on Node.js ≥ 20.16, Bun, Deno, Cloudflare Workers and browsers.
+
+## When to use it
+
+- You call something over the network and want retries, timeouts and a breaker that agree with each other.
+- You want errors you can handle exhaustively: [`settle()` and `Outcome.match()`](/concepts/typed-errors/) make a
+  forgotten "circuit open" case a compile error.
+- You need one tool for both client side (fetch, axios, database calls) and server side (load shedding, per-client
+  rate limits, request deadlines).
+
+If all you need is a single retry loop, the [`retry()` one-liner](/start/quick-start/#1-retry-one-call) does that in
+4.1 KB without building a pipeline.
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Installation" href="/start/installation/" description="Package managers, runtimes, entry points." />
+  <LinkCard title="Quick start" href="/start/quick-start/" description="From a one-liner to a tested pipeline in 5 minutes." />
+  <LinkCard title="Pipelines and strategy order" href="/concepts/pipelines/" description="Why the order you add strategies in matters." />
+  <LinkCard title="Why resilience-pipeline" href="/start/why/" description="What it does that other libraries don't." />
+</CardGrid>

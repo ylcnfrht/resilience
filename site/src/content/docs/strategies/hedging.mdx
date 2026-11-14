@@ -20,7 +20,7 @@ Use it for idempotent reads whose latency has a long tail: a replica that's some
 ```ts twoslash
 declare function search(query: string, signal: AbortSignal): Promise<string[]>;
 // ---cut---
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const pipeline = new ResiliencePipelineBuilder<string[]>()
   .addHedging({
@@ -39,7 +39,7 @@ const hits = await pipeline.execute(({ signal }) => search('red shoes', signal))
 ```ts twoslash
 declare function search(query: string, signal: AbortSignal): Promise<string[]>;
 // ---cut---
-import { PipelineBuilder, hedgingStrategy, timeoutStrategy } from '@nodelibraries/resilience';
+import { PipelineBuilder, hedgingStrategy, timeoutStrategy } from '@ylcnfrht/resilience';
 
 const pipeline = new PipelineBuilder<string[]>()
   .add(hedgingStrategy({ delay: '150ms', maxHedgedAttempts: 1 }))
@@ -86,7 +86,7 @@ Each attempt gets its own:
 - **copy of `properties`.** Parallel attempts can't overwrite each other's values. When an attempt wins, its properties are merged back into the caller's map. Losers' writes are dropped.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 declare function query(replica: number, signal: AbortSignal): Promise<string>;
 // ---cut---
 const pipeline = new ResiliencePipelineBuilder<string>().addHedging({ delay: 0, maxHedgedAttempts: 2 }).build();
@@ -107,7 +107,7 @@ properties.get('replica'); // the winner's replica
 `actionGenerator` returns the action for a hedged attempt, for example another region or endpoint. Return `undefined` to repeat the original callback. It isn't called for the primary.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 // ---cut---
 const regions = ['https://eu.api.example.com', 'https://us.api.example.com', 'https://ap.api.example.com'];
 
@@ -129,7 +129,7 @@ The generated action replaces the strategies added after hedging as well as the 
 `delayGenerator` returns the delay before each next attempt. It gets `{ attemptNumber, context }`, where `attemptNumber` is the attempt about to start (1 for the first hedge). The sign rules above apply per step: return `-1` to wait for a failure.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 // ---cut---
 // First hedge after 100 ms, the next one only if something fails.
 const pipeline = new ResiliencePipelineBuilder()

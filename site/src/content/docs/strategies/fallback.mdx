@@ -20,7 +20,7 @@ Use it when a degraded answer is better than an error: recommendations, prices f
 declare function getRates(signal: AbortSignal): Promise<Record<string, number>>;
 declare const lastKnownRates: Record<string, number>;
 // ---cut---
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const pipeline = new ResiliencePipelineBuilder<Record<string, number>>()
   .addFallback({ fallbackAction: () => lastKnownRates }) // outermost: catches what's left
@@ -38,7 +38,7 @@ const rates = await pipeline.execute(({ signal }) => getRates(signal));
 declare function getRates(signal: AbortSignal): Promise<Record<string, number>>;
 declare const lastKnownRates: Record<string, number>;
 // ---cut---
-import { PipelineBuilder, fallbackStrategy, retryStrategy, timeoutStrategy } from '@nodelibraries/resilience';
+import { PipelineBuilder, fallbackStrategy, retryStrategy, timeoutStrategy } from '@ylcnfrht/resilience';
 
 const pipeline = new PipelineBuilder<Record<string, number>>()
   .add(fallbackStrategy({ fallbackAction: () => lastKnownRates }))
@@ -85,7 +85,7 @@ A 404 isn't a failure to hide. A caller who cancelled doesn't want an answer. To
 Give one of the two; with neither, `build()` throws `RangeError`. If both are set, `fallbackAction` wins.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, isBrokenCircuitError } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, isBrokenCircuitError } from '@ylcnfrht/resilience';
 type Product = { id: string; name: string };
 declare const cache: { get(key: string): Promise<Product[] | undefined> };
 // ---cut---
@@ -118,7 +118,7 @@ const cached = new ResiliencePipelineBuilder<Product[]>()
 `addFallbackOn(codes, fallbackAction, options?)` handles failures whose `error.code` is in `codes` and lets everything else through. `options` takes `name`, `fallbackValue` and `onFallback`.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, Outcome } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, Outcome } from '@ylcnfrht/resilience';
 declare function getPrice(sku: string, signal: AbortSignal): Promise<number>;
 declare function cachedPrice(sku: string): number;
 // ---cut---
@@ -153,7 +153,7 @@ The equivalent for `PipelineBuilder` is `fallbackOnStrategy(codes, fallbackActio
 `addMapError(mapper)` doesn't substitute a value. It turns every failure of the strategies after it, the callback's included, into your own error. Use it at a service boundary so callers see `PaymentUnavailable`, not `TimeoutRejectedError`. Aborts pass through unchanged.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 declare function charge(signal: AbortSignal): Promise<string>;
 // ---cut---
 class PaymentUnavailable extends Error {
@@ -176,7 +176,7 @@ const outcome = await pipeline.settle(({ signal }) => charge(signal)); // error:
 `addStaleFallback` remembers the last successful result per key and returns it when a call fails. Unlike a [cache](/strategies/cache/), every call still goes to the dependency; the stored value is only used on failure.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 type Profile = { id: string; name: string };
 declare function getProfile(id: string, signal: AbortSignal): Promise<Profile>;
 // ---cut---

@@ -16,7 +16,7 @@ pipeline built per call never opens its breaker.
 <Tabs syncKey="builder">
   <TabItem label="ResiliencePipelineBuilder">
     ```ts twoslash
-    import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+    import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
     const pipeline = new ResiliencePipelineBuilder({ name: 'inventory' })
       .addRetry({ maxRetryAttempts: 3, backoffType: 'exponential' })
@@ -27,7 +27,7 @@ pipeline built per call never opens its breaker.
   </TabItem>
   <TabItem label="PipelineBuilder (tree-shakeable)">
     ```ts twoslash
-    import { PipelineBuilder, retryStrategy, circuitBreakerStrategy, timeoutStrategy } from '@nodelibraries/resilience';
+    import { PipelineBuilder, retryStrategy, circuitBreakerStrategy, timeoutStrategy } from '@ylcnfrht/resilience';
 
     const pipeline = new PipelineBuilder({ name: 'inventory' })
       .add(retryStrategy({ maxRetryAttempts: 3, backoffType: 'exponential' }))
@@ -76,7 +76,7 @@ The order changes what each strategy sees:
 The common production shape combines both timeouts: a total budget outside, per-attempt timeouts inside.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 // ---cut---
 const pipeline = new ResiliencePipelineBuilder()
   .addFallback({ fallbackValue: null })          // last resort
@@ -90,7 +90,7 @@ const pipeline = new ResiliencePipelineBuilder()
 ## Executing
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 declare const api: { getUser(id: string): Promise<{ id: string }> };
 const pipeline = new ResiliencePipelineBuilder().addRetry().build();
 // ---cut---
@@ -111,7 +111,7 @@ inside it, or call `execute` directly.
 circuit breaker or limiter between pipelines that call the same dependency:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 // ---cut---
 const paymentsBreaker = new ResiliencePipelineBuilder({ name: 'payments-breaker' })
   .addCircuitBreaker({ consecutiveFailures: 5 })
@@ -139,7 +139,7 @@ the outer signal. That is [deadline propagation](/concepts/context-and-signals/)
 `ResiliencePipelineRegistry` builds each keyed pipeline once and returns the same instance afterwards:
 
 ```ts twoslash
-import { ResiliencePipelineRegistry } from '@nodelibraries/resilience';
+import { ResiliencePipelineRegistry } from '@ylcnfrht/resilience';
 // ---cut---
 const registry = new ResiliencePipelineRegistry();
 const inventory = registry.getOrAddPipeline('inventory-api', (b) => b.addRetry().addTimeout(1000));
@@ -157,7 +157,7 @@ registry.dispose();         // on shutdown
 ## Kill switch, inspection, disposal
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, type CircuitBreakerStrategy } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, type CircuitBreakerStrategy } from '@ylcnfrht/resilience';
 const pipeline = new ResiliencePipelineBuilder().addRetry().addCircuitBreaker().build();
 // ---cut---
 pipeline.disable();   // every call bypasses every strategy (no retries, no breaker, no limits)

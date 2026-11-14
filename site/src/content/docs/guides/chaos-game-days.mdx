@@ -56,7 +56,7 @@ if it came from the dependency. Gate them twice: a flag that enables the experim
 outside its scope.
 
 ```ts twoslash title="pricing.ts"
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 declare const flags: { isOn(name: string): boolean; number(name: string, fallback: number): number };
 declare function fetchPrice(sku: string, signal: AbortSignal): Promise<number>;
 declare const lastKnownPrice: (sku: string) => number;
@@ -106,7 +106,7 @@ Experiments worth pre-wiring for each important dependency:
 touching their configuration. It returns a function that turns it off. Wrap it so it always turns itself off:
 
 ```ts twoslash title="game-day.ts"
-import { type Duration, setGlobalChaos } from '@nodelibraries/resilience';
+import { type Duration, setGlobalChaos } from '@ylcnfrht/resilience';
 // ---cut---
 let stop: (() => void) | undefined;
 let timer: ReturnType<typeof setTimeout> | undefined;
@@ -157,7 +157,7 @@ and `attemptNumber`. It does **not** see which pipeline is running, so give the 
 Count what you inject next to what users see. `onTelemetry` gets every event in the process:
 
 ```ts twoslash
-import { onTelemetry } from '@nodelibraries/resilience';
+import { onTelemetry } from '@ylcnfrht/resilience';
 declare const metrics: { increment(name: string, labels: Record<string, string>): void };
 // ---cut---
 const off = onTelemetry(({ event, source, context }) => {
@@ -203,7 +203,7 @@ injection deterministic:
 ```ts twoslash
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 test('pricing answers from the fallback when pricing is down', async () => {
   const pricing = new ResiliencePipelineBuilder<number>()

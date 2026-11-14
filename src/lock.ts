@@ -92,7 +92,7 @@ export class LockLostError extends Error {
 }
 
 /** `context.properties` key holding the fencing token of the lock the execution runs under. */
-export const LOCK_TOKEN = '@nodelibraries/resilience.lockToken';
+export const LOCK_TOKEN = '@ylcnfrht/resilience.lockToken';
 
 /** Fencing token of the innermost lock the calling code runs under. Pass it to the protected resource so it can reject stale writers. */
 export function getLockToken(context: ResilienceContext | undefined = getResilienceContext()): number | undefined {

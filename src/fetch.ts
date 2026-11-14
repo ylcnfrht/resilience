@@ -87,7 +87,7 @@ export interface HttpAdapter<R extends { status: number }> {
   discard?(response: R): unknown;
 }
 
-const REQUEST = '@nodelibraries/resilience:http:request';
+const REQUEST = '@ylcnfrht/resilience:http:request';
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE', 'PUT', 'DELETE']);
 const TRANSIENT_STATUS: readonly number[] = [408, 429, 500, 502, 503, 504];
 

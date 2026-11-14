@@ -10,12 +10,12 @@ import { Aside } from '@astrojs/starlight/components';
 `attachResilience(instance)` runs every request of an axios instance through the same pipeline as the [fetch integration](/integrations/fetch/): a total timeout, retries with backoff and jitter that honour `Retry-After`, and a circuit breaker per host. It works by wrapping the instance's adapter, so your interceptors, transforms and call sites stay as they are.
 
 ```sh
-npm i @nodelibraries/resilience axios   # axios >= 1 (optional peer dependency)
+npm i @ylcnfrht/resilience axios   # axios >= 1 (optional peer dependency)
 ```
 
 ```ts
 import axios from 'axios';
-import { attachResilience } from '@nodelibraries/resilience/axios';
+import { attachResilience } from '@ylcnfrht/resilience/axios';
 
 const api = axios.create({ baseURL: 'https://api.example.com' });
 const resilience = attachResilience(api, { name: 'orders-api', attemptTimeout: '3s' });
@@ -47,7 +47,7 @@ All shared options: `name`, `totalTimeout`, `attemptTimeout`, `retry`, `retryOn`
 
 ## Per-request overrides
 
-Importing `@nodelibraries/resilience/axios` adds a typed `resilience` field to `AxiosRequestConfig`:
+Importing `@ylcnfrht/resilience/axios` adds a typed `resilience` field to `AxiosRequestConfig`:
 
 ```ts
 await api.get('/health', { resilience: { retries: 0, timeout: '1s' } });
@@ -69,7 +69,7 @@ axios rejects non-2xx responses with an `AxiosError` that carries `error.respons
 | Attempt timeout (`TimeoutRejectedError`) | yes | yes |
 | Any other error without a response (`ERR_CANCELED`, a bad config…) | no | no |
 
-After the last retry, the caller gets the original `AxiosError`, so `error.response.status` and `axios.isAxiosError(error)` keep working. Rejections from the pipeline itself (`BrokenCircuitError`, `TimeoutRejectedError`, `BulkheadRejectedError`) come through unchanged; check them with `isBrokenCircuitError()` and friends from `@nodelibraries/resilience`.
+After the last retry, the caller gets the original `AxiosError`, so `error.response.status` and `axios.isAxiosError(error)` keep working. Rejections from the pipeline itself (`BrokenCircuitError`, `TimeoutRejectedError`, `BulkheadRejectedError`) come through unchanged; check them with `isBrokenCircuitError()` and friends from `@ylcnfrht/resilience`.
 
 Only idempotent requests are retried: `GET HEAD OPTIONS TRACE PUT DELETE`, or any method with an `Idempotency-Key` header or `resilience: { idempotent: true }`. The rules are explained on the [fetch page](/integrations/fetch/#idempotency-what-gets-retried).
 

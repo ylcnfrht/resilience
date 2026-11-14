@@ -1,5 +1,5 @@
 import { useState } from 'preact/hooks';
-import { PipelineBuilder, hedgingStrategy } from '@nodelibraries/resilience';
+import { PipelineBuilder, hedgingStrategy } from '@ylcnfrht/resilience';
 import Range from './Range.tsx';
 import { fmtMs } from './sim.ts';
 import { type Lane, Timeline, sleepOn, useFakeRun } from './Timeline.tsx';

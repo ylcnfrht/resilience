@@ -15,14 +15,14 @@ The outbound integrations protect you from your dependencies. The inbound middle
 - **cancellation** when the client disconnects;
 - **JSON error responses** with the right status for every resilience error raised in your handlers.
 
-Both live in `@nodelibraries/resilience/http` and import no framework. [Fastify](/integrations/fastify/) and [Koa](/integrations/koa/) have their own pages.
+Both live in `@ylcnfrht/resilience/http` and import no framework. [Fastify](/integrations/fastify/) and [Koa](/integrations/koa/) have their own pages.
 
 <Tabs syncKey="framework">
 <TabItem label="Express">
 ```ts
 import express from 'express';
-import { getResilienceSignal } from '@nodelibraries/resilience';
-import { resilienceMiddleware } from '@nodelibraries/resilience/http';
+import { getResilienceSignal } from '@ylcnfrht/resilience';
+import { resilienceMiddleware } from '@ylcnfrht/resilience/http';
 
 const app = express();
 app.use(
@@ -47,8 +47,8 @@ app.get('/orders/:id', async (req, res, next) => {
 <TabItem label="Hono">
 ```ts
 import { Hono } from 'hono';
-import { getResilienceSignal } from '@nodelibraries/resilience';
-import { honoResilience } from '@nodelibraries/resilience/http';
+import { getResilienceSignal } from '@ylcnfrht/resilience';
+import { honoResilience } from '@ylcnfrht/resilience/http';
 
 const app = new Hono();
 app.use(
@@ -116,7 +116,7 @@ The middleware only answers for its own rejections. A resilience error raised **
 <Tabs syncKey="framework">
 <TabItem label="Express">
 ```ts
-import { describeResilienceError } from '@nodelibraries/resilience/http';
+import { describeResilienceError } from '@ylcnfrht/resilience/http';
 
 // After your routes.
 app.use((error, req, res, next) => {
@@ -129,7 +129,7 @@ app.use((error, req, res, next) => {
 </TabItem>
 <TabItem label="Hono">
 ```ts
-import { describeResilienceError } from '@nodelibraries/resilience/http';
+import { describeResilienceError } from '@ylcnfrht/resilience/http';
 
 app.onError((error, c) => {
   const d = describeResilienceError(error);
@@ -165,7 +165,7 @@ Full list: [error codes](/reference/error-codes/).
 `describeResilienceError()` returns `{ code, httpStatus, retryAfter, message, source }` (`retryAfter` in seconds) and doesn't depend on HTTP. Use it wherever you build an error for a client:
 
 ```ts twoslash
-import { describeResilienceError } from '@nodelibraries/resilience/http';
+import { describeResilienceError } from '@ylcnfrht/resilience/http';
 declare class GraphQLError extends Error {
   constructor(message: string, options?: { extensions?: Record<string, unknown> });
 }
@@ -197,8 +197,8 @@ For gRPC, map the code to a status:
 Pass `pipeline` to use any strategies: queue priorities, the [adaptive concurrency limiter](/strategies/adaptive-concurrency/) instead of a fixed limit, a [Redis-backed](/integrations/redis/) rate limit. The inbound request is in `context.properties` under `HTTP_REQUEST`, for partition keys and priorities:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
-import { HTTP_REQUEST } from '@nodelibraries/resilience/http';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
+import { HTTP_REQUEST } from '@ylcnfrht/resilience/http';
 
 type Req = { headers: Record<string, string | undefined> };
 const plan = (ctx: { properties: Map<string, unknown> }) => (ctx.properties.get(HTTP_REQUEST) as Req).headers['x-plan'];

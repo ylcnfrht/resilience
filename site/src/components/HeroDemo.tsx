@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { PipelineBuilder, circuitBreakerStrategy, fallbackStrategy, retryStrategy, timeoutStrategy } from '@nodelibraries/resilience';
+import { PipelineBuilder, circuitBreakerStrategy, fallbackStrategy, retryStrategy, timeoutStrategy } from '@ylcnfrht/resilience';
 import { type ServiceConfig, flakyService, seeded, sleep } from './sim.ts';
 import './demo.css';
 import './HeroDemo.css';

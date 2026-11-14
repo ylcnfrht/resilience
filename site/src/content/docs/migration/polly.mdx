@@ -13,7 +13,7 @@ The API follows Polly v8 closely: same builder, same strategy names, same option
 
 ## Concept mapping
 
-| Polly v8 | @nodelibraries/resilience |
+| Polly v8 | @ylcnfrht/resilience |
 |---|---|
 | `new ResiliencePipelineBuilder<T>()` | `new ResiliencePipelineBuilder<T>()` (one generic builder; `T` defaults to `any`) |
 | `.AddRetry(new RetryStrategyOptions { … })` | `.addRetry({ … })` |
@@ -34,7 +34,7 @@ The API follows Polly v8 closely: same builder, same strategy names, same option
 | `TimeoutRejectedException`, `BrokenCircuitException`, `IsolatedCircuitException`, `RateLimiterRejectedException` | `TimeoutRejectedError`, `BrokenCircuitError`, `IsolatedCircuitError`, `RateLimiterRejectedError` (+ `BulkheadRejectedError` for the concurrency limiter) |
 | `CircuitBreakerManualControl`, `CircuitBreakerStateProvider` | same names |
 | `ResiliencePipelineRegistry<TKey>` / `AddResiliencePipeline` (DI) | `ResiliencePipelineRegistry`; NestJS: `ResilienceModule.forRoot({ pipelines })` |
-| `TimeProvider` / `FakeTimeProvider` | `timeProvider` / `FakeTimeProvider` from `@nodelibraries/resilience/testing` |
+| `TimeProvider` / `FakeTimeProvider` | `timeProvider` / `FakeTimeProvider` from `@ylcnfrht/resilience/testing` |
 | Telemetry via `Polly.Extensions` | `onTelemetry()`, `diagnostics_channel`, `/otel`, `/prometheus` |
 
 ## Side by side
@@ -70,13 +70,13 @@ var response = await pipeline.ExecuteAsync(
 ```
 
 </TabItem>
-<TabItem label="@nodelibraries/resilience">
+<TabItem label="@ylcnfrht/resilience">
 
 ```ts twoslash
 declare const url: string;
 declare const controller: AbortController;
 // ---cut---
-import { PredicateBuilder, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { PredicateBuilder, ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const pipeline = new ResiliencePipelineBuilder<Response>()
   .addRetry({
@@ -131,10 +131,10 @@ if (state.CircuitState == CircuitState.Open) { /* … */ }
 ```
 
 </TabItem>
-<TabItem label="@nodelibraries/resilience">
+<TabItem label="@ylcnfrht/resilience">
 
 ```ts twoslash
-import { CircuitBreakerManualControl, CircuitBreakerStateProvider, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { CircuitBreakerManualControl, CircuitBreakerStateProvider, ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const manual = new CircuitBreakerManualControl();
 const state = new CircuitBreakerStateProvider();
@@ -175,13 +175,13 @@ var pipeline = new ResiliencePipelineBuilder<UserAvatar>()
 ```
 
 </TabItem>
-<TabItem label="@nodelibraries/resilience">
+<TabItem label="@ylcnfrht/resilience">
 
 ```ts twoslash
 interface UserAvatar { url: string }
 const blankAvatar: UserAvatar = { url: '/blank.png' };
 // ---cut---
-import { PredicateBuilder, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { PredicateBuilder, ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const pipeline = new ResiliencePipelineBuilder<UserAvatar>()
   .addFallback({
@@ -212,10 +212,10 @@ var pipeline = new ResiliencePipelineBuilder<HttpResponseMessage>()
 ```
 
 </TabItem>
-<TabItem label="@nodelibraries/resilience">
+<TabItem label="@ylcnfrht/resilience">
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const pipeline = new ResiliencePipelineBuilder<Response>()
   .addHedging({ maxHedgedAttempts: 2, delay: '300ms' })
@@ -250,10 +250,10 @@ finally
 ```
 
 </TabItem>
-<TabItem label="@nodelibraries/resilience">
+<TabItem label="@ylcnfrht/resilience">
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, ResiliencePropertyKey } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, ResiliencePropertyKey } from '@ylcnfrht/resilience';
 declare function call(tenant: string, signal: AbortSignal): Promise<void>;
 declare const controller: AbortController;
 const pipeline = new ResiliencePipelineBuilder().addTimeout('2s').build();
@@ -294,11 +294,11 @@ time.Advance(TimeSpan.FromSeconds(2));
 ```
 
 </TabItem>
-<TabItem label="@nodelibraries/resilience">
+<TabItem label="@ylcnfrht/resilience">
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, ResiliencePipelineRegistry } from '@nodelibraries/resilience';
-import { FakeTimeProvider } from '@nodelibraries/resilience/testing';
+import { ResiliencePipelineBuilder, ResiliencePipelineRegistry } from '@ylcnfrht/resilience';
+import { FakeTimeProvider } from '@ylcnfrht/resilience/testing';
 
 const registry = new ResiliencePipelineRegistry();
 const pipeline = registry.getOrAddPipeline('inventory-api', (b) => b.addRetry().addTimeout('1s'));

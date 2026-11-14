@@ -13,7 +13,7 @@ The lock strategy runs a callback only while it holds a lease on a key: a mutex 
 <Tabs syncKey="builder">
 <TabItem label="ResiliencePipelineBuilder">
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 declare function buildReport(signal: AbortSignal): Promise<void>;
 // ---cut---
 const pipeline = new ResiliencePipelineBuilder()
@@ -25,7 +25,7 @@ await pipeline.execute(({ signal }) => buildReport(signal)); // LockNotAcquiredE
 </TabItem>
 <TabItem label="PipelineBuilder">
 ```ts twoslash
-import { PipelineBuilder, lockStrategy } from '@nodelibraries/resilience';
+import { PipelineBuilder, lockStrategy } from '@ylcnfrht/resilience';
 
 const pipeline = new PipelineBuilder()
   .add(lockStrategy({ key: () => 'nightly-report', ttl: '30s' }))
@@ -55,7 +55,7 @@ A lease alone is not enough. A process can pause (a GC pause, a VM migration, a 
 The fix is a **fencing token**: a number that increases with every acquisition of a key. Pass it with every write, and let the protected resource reject writes carrying a token lower than one it has already seen.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, getLockToken } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, getLockToken } from '@ylcnfrht/resilience';
 declare const db: { query(sql: string, params: unknown[]): Promise<{ rowCount: number }> };
 // ---cut---
 const pipeline = new ResiliencePipelineBuilder()
@@ -110,7 +110,7 @@ Aborting the caller's signal while waiting fails with the abort reason; the call
 To plug in Redis, Postgres or anything else, implement `LockStore`. Every method must be atomic for its key:
 
 ```ts twoslash
-import type { LockStore } from '@nodelibraries/resilience';
+import type { LockStore } from '@ylcnfrht/resilience';
 // ---cut---
 interface MyLockStore extends LockStore {
   /** No live lease: store { owner, expires: now + ttlMs }, bump the key's fencing token and return it. Else undefined. */

@@ -64,7 +64,7 @@ export interface InboundOptions {
 }
 
 /** `context.properties` key of the inbound request (Express `req` / Hono `c`), for your own partitioned limiters. */
-export const HTTP_REQUEST = '@nodelibraries/resilience.httpRequest';
+export const HTTP_REQUEST = '@ylcnfrht/resilience.httpRequest';
 
 export function inboundPipeline(options: InboundOptions): ResiliencePipeline {
   if (options.pipeline) return options.pipeline;

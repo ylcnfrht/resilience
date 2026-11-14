@@ -7,7 +7,7 @@ sidebar:
 
 import { Aside } from '@astrojs/starlight/components';
 
-Already running rate-limiter-flexible? `@nodelibraries/resilience/adapters` plugs them in as the backend of a strategy, so you keep your store and get the pipeline's waiting, telemetry and typed errors on top. The adapters are structurally typed: nothing here imports the library, and any version with the methods below works.
+Already running rate-limiter-flexible? `@ylcnfrht/resilience/adapters` plugs them in as the backend of a strategy, so you keep your store and get the pipeline's waiting, telemetry and typed errors on top. The adapters are structurally typed: nothing here imports the library, and any version with the methods below works.
 
 | Adapter | Turns | Into |
 |---|---|---|
@@ -19,8 +19,8 @@ Using Redis directly? The [Redis stores](/integrations/redis/) avoid the limitat
 
 ```ts
 import { RateLimiterRedis } from 'rate-limiter-flexible';
-import { RateLimiterStrategy, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
-import { fromRateLimiterFlexible } from '@nodelibraries/resilience/adapters';
+import { RateLimiterStrategy, ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
+import { fromRateLimiterFlexible } from '@ylcnfrht/resilience/adapters';
 
 const rlf = new RateLimiterRedis({ storeClient: redis, keyPrefix: 'partner', points: 100, duration: 60 });
 

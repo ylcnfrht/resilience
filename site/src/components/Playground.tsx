@@ -17,7 +17,7 @@ import {
   isTimeoutError,
   retryStrategy,
   timeoutStrategy,
-} from '@nodelibraries/resilience';
+} from '@ylcnfrht/resilience';
 import Range from './Range.tsx';
 import { type ServiceConfig, flakyService, fmtMs, seeded } from './sim.ts';
 import './demo.css';
@@ -129,7 +129,7 @@ function generateCode(snippets: string[]) {
   const fns = [...new Set(snippets.map((s) => s.slice(0, s.indexOf('('))))];
   const imports = ['PipelineBuilder', ...fns].join(', ');
   return [
-    `import { ${imports} } from '@nodelibraries/resilience';`,
+    `import { ${imports} } from '@ylcnfrht/resilience';`,
     '',
     '// Strategies run in the order they are added: the first is the outermost.',
     'const pipeline = new PipelineBuilder<User>()',

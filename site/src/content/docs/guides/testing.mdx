@@ -11,7 +11,7 @@ import { Aside } from '@astrojs/starlight/components';
 Tests either wait (slow), or shrink every duration to a few milliseconds (flaky on a busy CI machine, and no longer the configuration you ship).
 
 **The solution.** Every strategy reads time through a `TimeProvider`. In tests, pass a `FakeTimeProvider` from
-`@nodelibraries/resilience/testing` and move the clock by hand. A test of "three retries 10 s apart, then a 1 s timeout" finishes in
+`@ylcnfrht/resilience/testing` and move the clock by hand. A test of "three retries 10 s apart, then a 1 s timeout" finishes in
 a few milliseconds and does exactly the same thing every run.
 
 ## The fake clock
@@ -19,8 +19,8 @@ a few milliseconds and does exactly the same thing every run.
 ```ts twoslash
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ResiliencePipelineBuilder, TimeoutRejectedError } from '@nodelibraries/resilience';
-import { FakeTimeProvider } from '@nodelibraries/resilience/testing';
+import { ResiliencePipelineBuilder, TimeoutRejectedError } from '@ylcnfrht/resilience';
+import { FakeTimeProvider } from '@ylcnfrht/resilience/testing';
 
 test('gives up after 3 retries and 4 timeouts', async () => {
   const time = new FakeTimeProvider();
@@ -70,8 +70,8 @@ promise for a later `await` if it resolves), then move the clock, then await.
 ```ts twoslash
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
-import { FakeTimeProvider } from '@nodelibraries/resilience/testing';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
+import { FakeTimeProvider } from '@ylcnfrht/resilience/testing';
 
 test('retries exactly 10 s apart', async () => {
   const time = new FakeTimeProvider();
@@ -105,7 +105,7 @@ test('retries exactly 10 s apart', async () => {
 Build pipelines in a function that takes the clock, so production code uses the system clock and tests pass a fake one:
 
 ```ts twoslash title="payments-pipeline.ts"
-import { ResiliencePipelineBuilder, type TimeProvider } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, type TimeProvider } from '@ylcnfrht/resilience';
 
 export function paymentsPipeline(timeProvider?: TimeProvider) {
   return new ResiliencePipelineBuilder<Response>({ name: 'payments', timeProvider })
@@ -124,8 +124,8 @@ clock for that one call:
 ```ts twoslash
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ResiliencePipelineBuilder, TimeoutRejectedError } from '@nodelibraries/resilience';
-import { FakeTimeProvider } from '@nodelibraries/resilience/testing';
+import { ResiliencePipelineBuilder, TimeoutRejectedError } from '@ylcnfrht/resilience';
+import { FakeTimeProvider } from '@ylcnfrht/resilience/testing';
 // ---cut---
 // Defined once at module level in your app.
 const pipeline = new ResiliencePipelineBuilder()
@@ -153,8 +153,8 @@ Three tools make breaker tests exact: `consecutiveFailures` (opens after N failu
 ```ts twoslash
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BrokenCircuitError, CircuitBreakerStateProvider, ResiliencePipelineBuilder, nextTelemetry } from '@nodelibraries/resilience';
-import { FakeTimeProvider } from '@nodelibraries/resilience/testing';
+import { BrokenCircuitError, CircuitBreakerStateProvider, ResiliencePipelineBuilder, nextTelemetry } from '@ylcnfrht/resilience';
+import { FakeTimeProvider } from '@ylcnfrht/resilience/testing';
 
 test('opens after 3 failures, probes after 30 s, closes on success', async () => {
   const time = new FakeTimeProvider();
@@ -199,8 +199,8 @@ Limiters read the builder's clock too, so refills and `queueTimeout` queues are 
 ```ts twoslash
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { RateLimiterRejectedError, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
-import { FakeTimeProvider } from '@nodelibraries/resilience/testing';
+import { RateLimiterRejectedError, ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
+import { FakeTimeProvider } from '@ylcnfrht/resilience/testing';
 
 test('2 tokens, then one per second; waits up to 500 ms', async () => {
   const time = new FakeTimeProvider();
@@ -247,8 +247,8 @@ real dependency call is and every strategy above it reacts to it:
 ```ts twoslash
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
-import { FakeTimeProvider } from '@nodelibraries/resilience/testing';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
+import { FakeTimeProvider } from '@ylcnfrht/resilience/testing';
 declare function fetchPrice(sku: string, signal: AbortSignal): Promise<number>;
 // ---cut---
 // Production configuration, shared by the app and the tests.
@@ -289,8 +289,8 @@ Telemetry listeners are process-wide, so always filter by `source.pipelineName`,
 ```ts twoslash
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ResiliencePipelineBuilder, onTelemetry } from '@nodelibraries/resilience';
-import { FakeTimeProvider } from '@nodelibraries/resilience/testing';
+import { ResiliencePipelineBuilder, onTelemetry } from '@ylcnfrht/resilience';
+import { FakeTimeProvider } from '@ylcnfrht/resilience/testing';
 
 test('emits one OnRetry per retry', async () => {
   const time = new FakeTimeProvider();
@@ -334,7 +334,7 @@ Strategy order changes behaviour: a timeout added before a retry is a total budg
 ```ts twoslash
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ResiliencePipelineBuilder, type TimeProvider } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, type TimeProvider } from '@ylcnfrht/resilience';
 function paymentsPipeline(timeProvider?: TimeProvider) {
   return new ResiliencePipelineBuilder<Response>({ name: 'payments', timeProvider })
     .addRetry({ maxRetryAttempts: 3, delay: '200ms', backoffType: 'exponential' })

@@ -11,7 +11,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 ```ts
 import express from 'express';
-import { createHystrixStream } from '@nodelibraries/resilience/hystrix';
+import { createHystrixStream } from '@ylcnfrht/resilience/hystrix';
 
 const hystrix = createHystrixStream({ pipelines: ['payments', 'inventory'] });
 
@@ -29,7 +29,7 @@ Point the dashboard at `http://<host>/hystrix.stream`. The handler takes any Nod
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `pipelines` | `string[]` | required | Pipeline names to report, one `HystrixCommand` each. |
-| `group` | `string` | `'@nodelibraries/resilience'` | Hystrix command group. |
+| `group` | `string` | `'@ylcnfrht/resilience'` | Hystrix command group. |
 | `window` | `Duration` | `'10s'` | Rolling window, Hystrix's default. |
 | `interval` | `Duration` | `'1s'` | How often the stream writes. |
 | `timeProvider` | `TimeProvider` | system clock, unref'd timers | For tests. |

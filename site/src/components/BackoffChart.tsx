@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'preact/hooks';
-import { type BackoffType, type Jitter, computeDelay } from '@nodelibraries/resilience';
+import { type BackoffType, type Jitter, computeDelay } from '@ylcnfrht/resilience';
 import { fmtMs, seeded } from './sim.ts';
 import Range from './Range.tsx';
 import './demo.css';

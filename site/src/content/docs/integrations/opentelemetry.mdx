@@ -10,12 +10,12 @@ import { Aside } from '@astrojs/starlight/components';
 `instrumentOpenTelemetry()` exports the telemetry of **every pipeline in the process** to OpenTelemetry: traces with a span per execution and per attempt, and four metrics. One call at startup; no change to your pipelines.
 
 ```sh
-npm i @nodelibraries/resilience @opentelemetry/api   # @opentelemetry/api ^1.4 (optional peer dependency), plus the SDK of your choice
+npm i @ylcnfrht/resilience @opentelemetry/api   # @opentelemetry/api ^1.4 (optional peer dependency), plus the SDK of your choice
 ```
 
 ```ts title="telemetry.ts"
 import { NodeSDK } from '@opentelemetry/sdk-node';
-import { instrumentOpenTelemetry } from '@nodelibraries/resilience/otel';
+import { instrumentOpenTelemetry } from '@ylcnfrht/resilience/otel';
 
 const sdk = new NodeSDK({ /* exporters, resource… */ });
 sdk.start();
@@ -81,8 +81,8 @@ Nesting needs a context manager, which every OpenTelemetry Node SDK registers.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `meter` | `Meter` | `metrics.getMeter('@nodelibraries/resilience')` | Meter to create the instruments on. |
-| `tracer` | `Tracer` | `trace.getTracer('@nodelibraries/resilience')` | Tracer for the spans. |
+| `meter` | `Meter` | `metrics.getMeter('@ylcnfrht/resilience')` | Meter to create the instruments on. |
+| `tracer` | `Tracer` | `trace.getTracer('@ylcnfrht/resilience')` | Tracer for the spans. |
 | `metrics` | `boolean` | `true` | Record metrics. |
 | `traces` | `boolean` | `true` | Create execution and attempt spans. |
 | `spanEvents` | `boolean` | `true` | Add strategy events to the active span. Works with `traces: false` too, on your own spans. |

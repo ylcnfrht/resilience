@@ -13,7 +13,7 @@ Every error a strategy raises extends `ExecutionRejectedError` and carries:
 - `source`: `{ pipelineName, strategyName }` of the strategy that raised it.
 - `toJSON()`: `{ name, code, message, retryAfter?, source? }`, safe to log or send.
 
-The HTTP status comes from `describeResilienceError()` / `httpStatusFor()` in `@nodelibraries/resilience/http`. The `/http`, `/fastify` and `/koa` middlewares use the same mapping. A resilience error whose code isn't in the table maps to 503.
+The HTTP status comes from `describeResilienceError()` / `httpStatusFor()` in `@ylcnfrht/resilience/http`. The `/http`, `/fastify` and `/koa` middlewares use the same mapping. A resilience error whose code isn't in the table maps to 503.
 
 ## Strategy errors
 
@@ -54,8 +54,8 @@ It's the one strategy-related error outside the `ExecutionRejectedError` tree. I
 ```ts twoslash
 declare function chargeCard(): Promise<string>;
 // ---cut---
-import { ResiliencePipelineBuilder, isBrokenCircuitError, isRateLimitError, isTimeoutError } from '@nodelibraries/resilience';
-import { describeResilienceError } from '@nodelibraries/resilience/http';
+import { ResiliencePipelineBuilder, isBrokenCircuitError, isRateLimitError, isTimeoutError } from '@ylcnfrht/resilience';
+import { describeResilienceError } from '@ylcnfrht/resilience/http';
 
 const pipeline = new ResiliencePipelineBuilder<string>({ name: 'payments' }).addCircuitBreaker().addTimeout('2s').build();
 

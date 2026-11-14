@@ -70,7 +70,7 @@ export interface RateLimitInfo {
 }
 
 /** `context.properties` key of the `RateLimitInfo`. */
-export const RATE_LIMIT_INFO = '@nodelibraries/resilience.rateLimit';
+export const RATE_LIMIT_INFO = '@ylcnfrht/resilience.rateLimit';
 
 /** Limit, remaining permits and reset time the rate limiter reported for this execution, e.g. for `RateLimit-*` headers. */
 export function getRateLimitInfo(context: { readonly properties: Map<string, unknown> }): RateLimitInfo | undefined {

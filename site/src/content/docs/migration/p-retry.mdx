@@ -9,11 +9,11 @@ import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
 **Who this is for:** code that calls `pRetry()` and now also needs a timeout per attempt, a circuit breaker, typed errors, or a fake clock in tests.
 
-For a one-off retry, `retry()` from `@nodelibraries/resilience` is the direct replacement: a function and an options object, no pipeline to build. It only bundles the retry strategy (4.1 KB min+gzip against p-retry's 1.8 KB). When you need more than retries, build a pipeline and pass the same options to `addRetry()`.
+For a one-off retry, `retry()` from `@ylcnfrht/resilience` is the direct replacement: a function and an options object, no pipeline to build. It only bundles the retry strategy (4.1 KB min+gzip against p-retry's 1.8 KB). When you need more than retries, build a pipeline and pass the same options to `addRetry()`.
 
 ## Option mapping
 
-| p-retry 9 | @nodelibraries/resilience |
+| p-retry 9 | @ylcnfrht/resilience |
 |---|---|
 | `pRetry(input, options)` | `retry(fn, options)` |
 | `retries` (default 10) | `maxRetryAttempts` (default 3). Both count retries, not attempts |
@@ -35,7 +35,7 @@ For a one-off retry, `retry()` from `@nodelibraries/resilience` is the direct re
 | context `attemptNumber`, from 1 | `args.attemptNumber`, from 0 |
 | context `retriesLeft` | `args.retriesLeft` (in `onFailedAttempt`) |
 | context `retryDelay` | `args.retryDelay` (in `onRetry`) |
-| fake timers for tests | `timeProvider: new FakeTimeProvider()` from `@nodelibraries/resilience/testing` |
+| fake timers for tests | `timeProvider: new FakeTimeProvider()` from `@ylcnfrht/resilience/testing` |
 
 ## Side by side
 
@@ -59,12 +59,12 @@ const blob = await pRetry(
 ```
 
 </TabItem>
-<TabItem label="@nodelibraries/resilience">
+<TabItem label="@ylcnfrht/resilience">
 
 ```ts twoslash
 declare const url: string;
 // ---cut---
-import { NonRetryableError, retry } from '@nodelibraries/resilience';
+import { NonRetryableError, retry } from '@ylcnfrht/resilience';
 
 const blob = await retry(
   async ({ signal }) => {
@@ -98,14 +98,14 @@ const result = await pRetry(run, {
 ```
 
 </TabItem>
-<TabItem label="@nodelibraries/resilience">
+<TabItem label="@ylcnfrht/resilience">
 
 ```ts twoslash
 class ValidationError extends Error {}
 declare function run(): Promise<string>;
 declare const log: { warn(msg: string): void };
 // ---cut---
-import { retry } from '@nodelibraries/resilience';
+import { retry } from '@ylcnfrht/resilience';
 
 const result = await retry(run, {
   maxRetryAttempts: 4,
@@ -136,10 +136,10 @@ const response = await fetchWithRetry('https://example.com');
 ```
 
 </TabItem>
-<TabItem label="@nodelibraries/resilience">
+<TabItem label="@ylcnfrht/resilience">
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const pipeline = new ResiliencePipelineBuilder()
   .addRetry({ maxRetryAttempts: 5, backoffType: 'exponential', delay: 1000 })
@@ -160,7 +160,7 @@ p-retry has no timeout. With a pipeline, put the timeout after the retry so each
 ```ts twoslash
 declare function run(signal: AbortSignal): Promise<string>;
 // ---cut---
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const pipeline = new ResiliencePipelineBuilder()
   .addRetry({ maxRetryAttempts: 5, backoffType: 'exponential', delay: 1000, maxRetryTime: '30s' })
@@ -184,13 +184,13 @@ mock.timers.tick(10_000);
 ```
 
 </TabItem>
-<TabItem label="@nodelibraries/resilience">
+<TabItem label="@ylcnfrht/resilience">
 
 ```ts twoslash
 declare function run(): Promise<string>;
 // ---cut---
-import { retry } from '@nodelibraries/resilience';
-import { FakeTimeProvider } from '@nodelibraries/resilience/testing';
+import { retry } from '@ylcnfrht/resilience';
+import { FakeTimeProvider } from '@ylcnfrht/resilience/testing';
 
 const time = new FakeTimeProvider();
 const promise = retry(run, { maxRetryAttempts: 3, timeProvider: time });

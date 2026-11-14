@@ -1,19 +1,19 @@
 ---
 title: Introduction
-description: '@nodelibraries/resilience composes retry, circuit breaker, timeout, hedging and rate limiting into one typed pipeline for every JavaScript runtime.'
+description: '@ylcnfrht/resilience composes retry, circuit breaker, timeout, hedging and rate limiting into one typed pipeline for every JavaScript runtime.'
 sidebar:
   order: 1
 ---
 
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-@nodelibraries/resilience wraps calls to things that fail: HTTP APIs, databases, queues, LLM providers. You describe how to
+@ylcnfrht/resilience wraps calls to things that fail: HTTP APIs, databases, queues, LLM providers. You describe how to
 react to failure once, as a **pipeline** of strategies, and run any call through it.
 
 ```ts twoslash
 declare function chargeCard(amount: number, signal: AbortSignal): Promise<{ id: string }>;
 // ---cut---
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const payments = new ResiliencePipelineBuilder({ name: 'payments' })
   .addRetry({ maxRetryAttempts: 3, backoffType: 'exponential', useJitter: true })
@@ -59,5 +59,5 @@ If all you need is a single retry loop, the [`retry()` one-liner](/start/quick-s
   <LinkCard title="Installation" href="/start/installation/" description="Package managers, runtimes, entry points." />
   <LinkCard title="Quick start" href="/start/quick-start/" description="From a one-liner to a tested pipeline in 5 minutes." />
   <LinkCard title="Pipelines and strategy order" href="/concepts/pipelines/" description="Why the order you add strategies in matters." />
-  <LinkCard title="Why @nodelibraries/resilience" href="/start/why/" description="What it does that other libraries don't." />
+  <LinkCard title="Why @ylcnfrht/resilience" href="/start/why/" description="What it does that other libraries don't." />
 </CardGrid>

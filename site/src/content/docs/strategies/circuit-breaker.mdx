@@ -18,7 +18,7 @@ Use one breaker per downstream dependency, shared by every call to it (build the
 <TabItem label="ResiliencePipelineBuilder">
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const payments = new ResiliencePipelineBuilder()
   .addCircuitBreaker({
@@ -36,7 +36,7 @@ const res = await payments.execute(({ signal }) => fetch('https://pay.example.co
 <TabItem label="PipelineBuilder (smallest bundle)">
 
 ```ts twoslash
-import { PipelineBuilder, circuitBreakerStrategy } from '@nodelibraries/resilience';
+import { PipelineBuilder, circuitBreakerStrategy } from '@ylcnfrht/resilience';
 
 const payments = new PipelineBuilder()
   .add(circuitBreakerStrategy({ failureRatio: 0.5, minimumThroughput: 20, samplingDuration: '30s', breakDuration: '10s' }))
@@ -87,7 +87,7 @@ Pick one rule; `consecutiveFailures` can be combined with the others.
 </Aside>
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 // The last 20 calls; open at 50% failures once 10 were recorded.
 const pipeline = new ResiliencePipelineBuilder()
@@ -100,7 +100,7 @@ const pipeline = new ResiliencePipelineBuilder()
 A `CircuitBreakerPolicy` replaces `failureRatio`, `minimumThroughput` and the window (`consecutiveFailures` still applies). Only calls made while closed are recorded. Use one instance per breaker; it holds that breaker's history.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, type CircuitBreakerPolicy } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, type CircuitBreakerPolicy } from '@ylcnfrht/resilience';
 
 /** Open after 5 failures within one minute, whatever the success count. */
 class FailuresPerMinute implements CircuitBreakerPolicy {
@@ -134,7 +134,7 @@ const pipeline = new ResiliencePipelineBuilder().addCircuitBreaker({ breaker: ne
 `breakDuration` (default 5 s) is how long the circuit stays open. For a break that grows while the dependency stays down, use `breakDurationGenerator`. It receives the window metrics (`total`, `failureCount`, `failureRate`), `halfOpenAttempts` (failed half-open rounds in a row) and `context`:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 // 5 s, 10 s, 20 s, … up to 2 min, reset when the circuit closes.
 const pipeline = new ResiliencePipelineBuilder()
@@ -182,7 +182,7 @@ Invalid values throw `RangeError` on `build()`. Callbacks may be async and are a
 `CircuitBreakerManualControl` holds circuits open (isolated) or closes them, for example from an admin endpoint during an incident. One control can drive several breakers.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, CircuitBreakerManualControl } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, CircuitBreakerManualControl } from '@ylcnfrht/resilience';
 
 const control = new CircuitBreakerManualControl(); // `new CircuitBreakerManualControl(true)` starts isolated
 const pipeline = new ResiliencePipelineBuilder().addCircuitBreaker({ manualControl: control }).build();
@@ -202,7 +202,7 @@ Isolations stack: the circuit stays isolated until every `isolate()` has been re
 ## Reading state
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, CircuitBreakerStateProvider, type CircuitBreakerStrategy } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, CircuitBreakerStateProvider, type CircuitBreakerStrategy } from '@ylcnfrht/resilience';
 
 const state = new CircuitBreakerStateProvider();
 const pipeline = new ResiliencePipelineBuilder().addCircuitBreaker({ stateProvider: state }).build();
@@ -226,7 +226,7 @@ A state provider belongs to one breaker; attaching it to a second one throws. `g
 Serverless functions and restarts lose in-memory state. Save `stateProvider.snapshot()` and pass it back as `initialState`. The snapshot includes the rolling window, so the failure history survives too.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, CircuitBreakerStateProvider, type CircuitSnapshot } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, CircuitBreakerStateProvider, type CircuitSnapshot } from '@ylcnfrht/resilience';
 declare const kv: { get(key: string): Promise<CircuitSnapshot | null>; put(key: string, value: string): Promise<void> };
 // ---cut---
 const state = new CircuitBreakerStateProvider();
@@ -259,7 +259,7 @@ A snapshot saved while `isolated` restores as isolated. Only a `manualControl` c
 Extensions add background behaviour. They live in separate modules, so you only bundle what you use. `pipeline.dispose()` stops them.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, circuitHealthCheck, sharedCircuitState, MemoryCircuitStateStore } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, circuitHealthCheck, sharedCircuitState, MemoryCircuitStateStore } from '@ylcnfrht/resilience';
 declare const db: { ping(signal: AbortSignal): Promise<void> };
 // ---cut---
 const store = new MemoryCircuitStateStore(); // RedisCircuitStateStore across servers
@@ -294,7 +294,7 @@ pipeline.dispose();
 | `key` | `string`, one per logical breaker | required |
 | `syncInterval` | `Duration` | `'5s'` |
 
-Stores: `MemoryCircuitStateStore` (one process, tests) and `RedisCircuitStateStore` from `@nodelibraries/resilience/redis` (see [Multi-instance with Redis](/guides/multi-instance/)). A failing store never fails calls; it is reported as `OnCircuitStoreError`.
+Stores: `MemoryCircuitStateStore` (one process, tests) and `RedisCircuitStateStore` from `@ylcnfrht/resilience/redis` (see [Multi-instance with Redis](/guides/multi-instance/)). A failing store never fails calls; it is reported as `OnCircuitStoreError`.
 
 ## Events and errors
 

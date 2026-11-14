@@ -21,7 +21,7 @@ sidebar:
 
 ## Code blocks
 - Use ```` ```ts twoslash ```` for TypeScript examples that import the library: they are TYPE-CHECKED at build time
-  against the real source (`'@nodelibraries/resilience'` and subpaths like `'@nodelibraries/resilience/fetch'` resolve to `../src`).
+  against the real source (`'@ylcnfrht/resilience'` and subpaths like `'@ylcnfrht/resilience/fetch'` resolve to `../src`).
   A type error fails the build — so examples must compile. Declare external things you use but don't define:
   `declare function fetchUser(id: string): Promise<User>;` (put scaffolding above `// ---cut---` to hide it).
 - Show types on hover with `//    ^?` sparingly (one per page max), only where the inferred type is the point (typed errors).

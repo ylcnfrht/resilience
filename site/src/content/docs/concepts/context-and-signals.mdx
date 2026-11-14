@@ -11,7 +11,7 @@ Every callback receives a `ResilienceContext`. Its most important field is `sign
 cancellation all work by aborting it. JavaScript can't stop a running promise, so **pass `signal` to your I/O**.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 const pipeline = new ResiliencePipelineBuilder().addTimeout('2s').build();
 // ---cut---
 await pipeline.execute(({ signal, attemptNumber }) =>
@@ -60,7 +60,7 @@ A pipeline executed *inside* another pipeline's callback inherits its signal. An
 call made underneath it, including calls that never received the signal:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 // ---cut---
 const perRequest = new ResiliencePipelineBuilder().addTimeout('3s').build();
 const payments = new ResiliencePipelineBuilder({ name: 'payments' }).addRetry().build();
@@ -84,7 +84,7 @@ Code that runs inside an execution but doesn't receive the context (a decorated 
 helper) can read it:
 
 ```ts twoslash
-import { getResilienceSignal, getResilienceContext } from '@nodelibraries/resilience';
+import { getResilienceSignal, getResilienceContext } from '@ylcnfrht/resilience';
 declare const db: { query(sql: string, options: { signal?: AbortSignal }): Promise<unknown[]> };
 // ---cut---
 export async function findOrders(customerId: string) {
@@ -102,7 +102,7 @@ Both return `undefined` outside an execution, and always in browsers.
 Mark non-idempotent calls, such as a payment, with `idempotent: false`:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 const pipeline = new ResiliencePipelineBuilder().addRetry().addConcurrencyLimiter(10).build();
 declare function createPayment(signal: AbortSignal): Promise<{ id: string }>;
 // ---cut---
@@ -122,7 +122,7 @@ Some callbacks start work that outlives them: a timer, a stream the caller only 
 `context.properties` is an untyped `Map`. `ResiliencePropertyKey` gives typed access, in the style of Polly:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, ResiliencePropertyKey } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, ResiliencePropertyKey } from '@ylcnfrht/resilience';
 // ---cut---
 const TENANT = new ResiliencePropertyKey<string>('tenant');
 

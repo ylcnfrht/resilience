@@ -21,7 +21,7 @@ Use **cache** when the same data is read far more often than it changes. Use **c
 <Tabs syncKey="builder">
 <TabItem label="ResiliencePipelineBuilder">
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 interface Rates { eur: number; usd: number }
 declare function fetchRates(signal: AbortSignal): Promise<Rates>;
 // ---cut---
@@ -35,7 +35,7 @@ const rates = await pipeline.execute(({ signal }) => fetchRates(signal));
 </TabItem>
 <TabItem label="PipelineBuilder">
 ```ts twoslash
-import { PipelineBuilder, cacheStrategy, timeoutStrategy } from '@nodelibraries/resilience';
+import { PipelineBuilder, cacheStrategy, timeoutStrategy } from '@ylcnfrht/resilience';
 interface Rates { eur: number; usd: number }
 // ---cut---
 const pipeline = new PipelineBuilder<Rates>()
@@ -70,7 +70,7 @@ The default key is `context.operationKey`. If you never pass `operationKey` to `
 ## Coalescing (single-flight)
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 interface User { id: string; name: string }
 declare function loadUser(id: string, signal: AbortSignal): Promise<User>;
 // ---cut---
@@ -121,7 +121,7 @@ Put timeouts and retries **inside** (after) the cache, so they apply to the shar
 | `key`, `shouldServeStale`, `onStaleServed`, `name` | | as above; `name` defaults to `'StaleFallback'` | |
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 declare function fetchPrices(signal: AbortSignal): Promise<Record<string, number>>;
 // ---cut---
 const pipeline = new ResiliencePipelineBuilder()
@@ -136,7 +136,7 @@ const pipeline = new ResiliencePipelineBuilder()
 `MemoryCacheStore` is the default: an in-process `Map` bounded by `maxEntries` (default `1000`), evicting the least recently used entry. It ignores the TTL hint; the strategy deletes expired entries when it reads them and LRU bounds the rest. It also has `size` and `clear()`.
 
 ```ts twoslash
-import { MemoryCacheStore, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { MemoryCacheStore, ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const store = new MemoryCacheStore({ maxEntries: 10_000 });
 const a = new ResiliencePipelineBuilder().addCache({ ttl: '5m', store }).build();
@@ -148,7 +148,7 @@ store.clear(); // e.g. after a deploy
 Implement `CacheStore` to use anything else. Methods may be sync or async:
 
 ```ts twoslash
-import type { CacheEntry, CacheStore } from '@nodelibraries/resilience';
+import type { CacheEntry, CacheStore } from '@ylcnfrht/resilience';
 // ---cut---
 interface MyCacheStore extends CacheStore {
   get(key: string): Promise<CacheEntry | undefined>;

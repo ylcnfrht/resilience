@@ -1,6 +1,6 @@
 ---
 title: Bundle size
-description: How @nodelibraries/resilience tree-shakes, what each common setup costs in min+gzip, and how to keep browser bundles small.
+description: How @ylcnfrht/resilience tree-shakes, what each common setup costs in min+gzip, and how to keep browser bundles small.
 sidebar:
   order: 6
 ---
@@ -30,7 +30,7 @@ Per-scenario numbers for more setups are in [Bundle sizes](/reference/bundle-siz
 `PipelineBuilder` has only `add()`; you pass it strategy definitions, and only those are bundled:
 
 ```ts twoslash
-import { PipelineBuilder, retryStrategy, circuitBreakerStrategy, timeoutStrategy } from '@nodelibraries/resilience';
+import { PipelineBuilder, retryStrategy, circuitBreakerStrategy, timeoutStrategy } from '@ylcnfrht/resilience';
 
 const pipeline = new PipelineBuilder({ name: 'api' })
   .add(retryStrategy({ maxRetryAttempts: 3, backoffType: 'exponential' }))
@@ -62,7 +62,7 @@ The resulting pipeline is identical, typed errors included. Every `addX()` has a
 
 - **One strategy, no pipeline:** `retry()` and `withTimeout()` build their strategy directly, without a builder.
 - **Code that only consumes results** (a UI layer handling `settle()` outcomes): import from
-  `@nodelibraries/resilience/outcome`. It has `Outcome`, the error classes and the guards, and no strategy.
+  `@ylcnfrht/resilience/outcome`. It has `Outcome`, the error classes and the guards, and no strategy.
 - **Pass predicates as functions** when size matters. `PredicateBuilder` is only bundled if you use it.
 - **Circuit breaker extensions** (`circuitHealthCheck`, `sharedCircuitState`) are separate modules, bundled only
   when you pass them in `extensions`.

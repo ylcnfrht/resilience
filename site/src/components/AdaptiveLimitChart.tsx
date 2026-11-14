@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'preact/hooks';
-import { aimd, gradient2, vegas } from '@nodelibraries/resilience';
+import { aimd, gradient2, vegas } from '@ylcnfrht/resilience';
 import { type AdaptivePoint, runAdaptive } from './limiter-sims.ts';
 import './demo.css';
 import './AdaptiveLimitChart.css';

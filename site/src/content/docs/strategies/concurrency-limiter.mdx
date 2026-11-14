@@ -13,7 +13,7 @@ A concurrency limiter (a bulkhead) caps how many executions run at the same time
 <Tabs syncKey="builder">
 <TabItem label="ResiliencePipelineBuilder">
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const pipeline = new ResiliencePipelineBuilder()
   .addConcurrencyLimiter({ permitLimit: 10, queueLimit: 50, queueTimeout: '2s' })
@@ -24,7 +24,7 @@ const res = await pipeline.execute(({ signal }) => fetch('https://api.example.co
 </TabItem>
 <TabItem label="PipelineBuilder">
 ```ts twoslash
-import { PipelineBuilder, concurrencyLimiterStrategy } from '@nodelibraries/resilience';
+import { PipelineBuilder, concurrencyLimiterStrategy } from '@ylcnfrht/resilience';
 
 const pipeline = new PipelineBuilder()
   .add(concurrencyLimiterStrategy({ permitLimit: 10, queueLimit: 50, queueTimeout: '2s' }))
@@ -57,7 +57,7 @@ The default `queueLimit` is 0. Waiting rarely helps an overloaded service: calle
 | `'drop-lowest-priority'` | The newest waiter of the lowest priority is dropped, *only if* the newcomer outranks it (a strictly lower `priority` number). Otherwise the newcomer is rejected. |
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 // Paying customers jump the queue; under pressure, free-tier waiters are dropped first.
 const pipeline = new ResiliencePipelineBuilder()
@@ -101,7 +101,7 @@ Every rejection is a `BulkheadRejectedError`:
 It extends `RateLimiterRejectedError`, so `isRateLimitError()` and `isRejection()` match it. The default retry predicate does not retry rejections; the default fallback predicate does handle them. The `/http` helpers map it to **503**, not 429: a full bulkhead is a capacity problem on your side, not the client sending too fast. See [error codes](/reference/error-codes/).
 
 ```ts twoslash
-import { type ResiliencePipeline, BulkheadRejectedError } from '@nodelibraries/resilience';
+import { type ResiliencePipeline, BulkheadRejectedError } from '@ylcnfrht/resilience';
 declare const pipeline: ResiliencePipeline;
 declare function generateReport(signal: AbortSignal): Promise<string>;
 // ---cut---
@@ -125,7 +125,7 @@ try {
 `active` and `queued` are readable on the strategy instance, e.g. for a health endpoint or a dashboard. `ResiliencePipelineRegistry.limiters()` lists every limiter of every registered pipeline.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, ConcurrencyLimiterStrategy } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, ConcurrencyLimiterStrategy } from '@ylcnfrht/resilience';
 
 const pipeline = new ResiliencePipelineBuilder().addConcurrencyLimiter(10, 50).build();
 

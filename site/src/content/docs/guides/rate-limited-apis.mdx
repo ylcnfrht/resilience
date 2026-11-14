@@ -28,8 +28,8 @@ The fetch integration already does layer 2 for you: it retries 429 and 503, wait
 asks for (seconds or an HTTP date), and drains the discarded response. Add a time limit and a budget:
 
 ```ts twoslash
-import { RetryBudget } from '@nodelibraries/resilience';
-import { createResilientFetch } from '@nodelibraries/resilience/fetch';
+import { RetryBudget } from '@ylcnfrht/resilience';
+import { createResilientFetch } from '@ylcnfrht/resilience/fetch';
 
 const crmBudget = new RetryBudget({ ratio: 0.1 }); // retries add at most 10% to the request rate
 
@@ -59,8 +59,8 @@ pass on to your own caller with its `Retry-After`.
 For an SDK or your own HTTP client, put the pieces together yourself:
 
 ```ts twoslash title="crm.ts"
-import { RateLimiterControl, ResiliencePipelineBuilder, RetryBudget } from '@nodelibraries/resilience';
-import { parseRetryAfter } from '@nodelibraries/resilience/fetch';
+import { RateLimiterControl, ResiliencePipelineBuilder, RetryBudget } from '@ylcnfrht/resilience';
+import { parseRetryAfter } from '@ylcnfrht/resilience/fetch';
 
 /** What the client throws for an error response. `retryAfter` is in ms. */
 class HttpError extends Error {
@@ -128,7 +128,7 @@ refilling 5 per second" is a token bucket: `addRateLimiter({ tokenLimit: 20, rep
 LLM and GraphQL APIs often meter tokens or points per call. Give each call a weight with `permits`:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 declare function complete(prompt: string, maxTokens: number, signal: AbortSignal): Promise<string>;
 // ---cut---
 const COST = 'cost';
@@ -155,7 +155,7 @@ When your own customers trigger the calls, a single shared limit lets one of the
 tenant, created on first use, with the API's overall limit behind it.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, TokenBucketStrategy } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, TokenBucketStrategy } from '@ylcnfrht/resilience';
 declare function search(query: string, signal: AbortSignal): Promise<unknown[]>;
 declare const tenantId: string;
 // ---cut---
@@ -192,7 +192,7 @@ limiter's window. With several instances, use `redisPartitionLimiter` so the sha
 last `window` (default 10 s), plus `minRetriesPerSecond` (default 10) so a quiet service can still retry.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, RetryBudget } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, RetryBudget } from '@ylcnfrht/resilience';
 // ---cut---
 // One budget per dependency, shared by every pipeline that calls it.
 const crmBudget = new RetryBudget({ ratio: 0.1, minRetriesPerSecond: 2 });

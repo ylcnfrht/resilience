@@ -36,7 +36,7 @@ export default defineConfig({
   cacheDir: process.env.ASTRO_CACHE_DIR ?? './node_modules/.astro',
   vite: {
     // Interactive components import the library straight from source, so the playground always runs the current code.
-    resolve: { alias: [{ find: /^@nodelibraries\/resilience$/, replacement: `${lib}index.ts` }, { find: /^@nodelibraries\/resilience\/(.*)$/, replacement: `${lib}$1.ts` }] },
+    resolve: { alias: [{ find: /^@ylcnfrht\/resilience$/, replacement: `${lib}index.ts` }, { find: /^@ylcnfrht\/resilience\/(.*)$/, replacement: `${lib}$1.ts` }] },
     server: { fs: { allow: ['..'] } },
     // ec.config.mjs pulls twoslash + the TypeScript compiler into SSR; bundling them exhausts the heap.
     ssr: { external: ['typescript', 'twoslash', 'expressive-code-twoslash', '@typescript/vfs'] },
@@ -44,7 +44,7 @@ export default defineConfig({
   integrations: [
     preact(),
     starlight({
-      title: '@nodelibraries/resilience',
+      title: '@ylcnfrht/resilience',
       description: 'Resilience pipelines for TypeScript: retry, circuit breaker, timeout, hedging, rate limiting, typed errors — for Node, Bun, Deno, Workers and browsers.',
       logo: { src: './src/assets/logo.svg' },
       favicon: '/favicon.svg',
@@ -57,7 +57,7 @@ export default defineConfig({
       ],
       customCss: ['@fontsource-variable/geist', '@fontsource-variable/geist-mono', './src/styles/theme.css'],
       components: { Header: './src/components/overrides/Header.astro' },
-      social: [{ icon: 'seti:npm', label: 'npm', href: 'https://www.npmjs.com/package/@nodelibraries/resilience' }],
+      social: [{ icon: 'seti:npm', label: 'npm', href: 'https://www.npmjs.com/package/@ylcnfrht/resilience' }],
       lastUpdated: false,
       pagination: true,
       tableOfContents: { minHeadingLevel: 2, maxHeadingLevel: 3 },

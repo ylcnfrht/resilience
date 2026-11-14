@@ -10,13 +10,13 @@ import { Aside } from '@astrojs/starlight/components';
 `fastifyResilience` gives every request the same inbound protection as the [Express and Hono middleware](/integrations/express-and-hono/): a deadline that propagates to every pipeline called underneath, load shedding, a rate limit with `RateLimit-*` headers, cancellation on client disconnect, and JSON `504`/`503`/`429`/`409`/`403` responses.
 
 ```sh
-npm i @nodelibraries/resilience fastify   # fastify >= 4 (optional peer dependency)
+npm i @ylcnfrht/resilience fastify   # fastify >= 4 (optional peer dependency)
 ```
 
 ```ts
 import Fastify from 'fastify';
-import { getResilienceSignal } from '@nodelibraries/resilience';
-import { fastifyResilience } from '@nodelibraries/resilience/fastify';
+import { getResilienceSignal } from '@ylcnfrht/resilience';
+import { fastifyResilience } from '@ylcnfrht/resilience/fastify';
 
 const app = Fastify();
 
@@ -50,7 +50,7 @@ The plugin takes `InboundOptions`, the same as the Express middleware: `timeout`
 Errors thrown by your handlers go to Fastify's error handler as usual. To map resilience errors raised downstream (an open circuit, a timeout), use [`describeResilienceError`](/integrations/express-and-hono/#status-mapping):
 
 ```ts
-import { describeResilienceError } from '@nodelibraries/resilience/http';
+import { describeResilienceError } from '@ylcnfrht/resilience/http';
 
 app.setErrorHandler((error, req, reply) => {
   const d = describeResilienceError(error);

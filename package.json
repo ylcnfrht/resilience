@@ -1,6 +1,6 @@
 {
-  "name": "@nodelibraries/resilience",
-  "version": "0.2.0",
+  "name": "@ylcnfrht/resilience",
+  "version": "0.3.0",
   "description": "Resilience pipelines for TypeScript: retry, circuit breaker, timeout, hedging, rate limiting and typed errors. A Polly v8 API for Node, Bun, Deno, Workers and browsers. Zero dependencies.",
   "keywords": [
     "resilience",
@@ -31,11 +31,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nodelibraries/resilience.git"
+    "url": "git+https://github.com/ylcnfrht/resilience.git"
   },
   "homepage": "https://resilience.ferhatyalcin.dev",
   "bugs": {
-    "url": "https://github.com/nodelibraries/resilience/issues"
+    "url": "https://github.com/ylcnfrht/resilience/issues"
   },
   "funding": {
     "type": "buymeacoffee",

@@ -14,7 +14,7 @@ consumers of that stream; you can write your own in a few lines.
 ## Events
 
 ```ts twoslash
-import { onTelemetry } from '@nodelibraries/resilience';
+import { onTelemetry } from '@ylcnfrht/resilience';
 
 const unsubscribe = onTelemetry(({ event, source, context, args }) => {
   if (event === 'OnCircuitOpened') {
@@ -33,11 +33,11 @@ Each `TelemetryEvent` has:
 | `args` | Event-specific payload, the same object the matching `on*` callback receives |
 
 `onTelemetry` works in every runtime. On runtimes with `node:diagnostics_channel` (Node, Bun, Deno), the same
-events are also published on the `@nodelibraries/resilience` channel (`TELEMETRY_CHANNEL`):
+events are also published on the `@ylcnfrht/resilience` channel (`TELEMETRY_CHANNEL`):
 
 ```ts twoslash
 import { subscribe } from 'node:diagnostics_channel';
-import { TELEMETRY_CHANNEL, type TelemetryEvent } from '@nodelibraries/resilience';
+import { TELEMETRY_CHANNEL, type TelemetryEvent } from '@ylcnfrht/resilience';
 
 subscribe(TELEMETRY_CHANNEL, (message) => {
   const { event, source } = message as TelemetryEvent;
@@ -90,7 +90,7 @@ Events report what happened. `instrument()` wraps the work itself, which tracing
 your callback runs so your own spans nest under it.
 
 ```ts twoslash
-import { instrument } from '@nodelibraries/resilience';
+import { instrument } from '@ylcnfrht/resilience';
 // ---cut---
 const remove = instrument({
   execution: async (info, run) => {

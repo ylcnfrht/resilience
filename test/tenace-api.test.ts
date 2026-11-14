@@ -1,4 +1,4 @@
-// Covers the items from tenace's API reference that @nodelibraries/resilience was missing.
+// Covers the items from tenace's API reference that @ylcnfrht/resilience was missing.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {

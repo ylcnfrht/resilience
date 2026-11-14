@@ -112,7 +112,7 @@ test('E1: errors carry a code and the pipeline/strategy that raised them; guards
   assert.deepEqual(err.source, { pipelineName: 'payments', strategyName: 'per-try' });
   assert.deepEqual(JSON.parse(JSON.stringify(err)).code, 'TIMEOUT');
   // An error from a duplicate copy of the package: same brand symbol, different class identity.
-  const foreign = { [Symbol.for('@nodelibraries/resilience.error')]: true, code: 'TIMEOUT', message: 'x', retryAfter: undefined };
+  const foreign = { [Symbol.for('@ylcnfrht/resilience.error')]: true, code: 'TIMEOUT', message: 'x', retryAfter: undefined };
   assert.ok(isResilienceError(foreign) && isTimeoutError(foreign));
   assert.ok(!(foreign instanceof TimeoutRejectedError));
   assert.equal(describeResilienceError(foreign)?.httpStatus, 504);

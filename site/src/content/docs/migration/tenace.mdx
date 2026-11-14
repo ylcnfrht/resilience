@@ -1,6 +1,6 @@
 ---
 title: From tenace
-description: Port @julr/tenace policies to @nodelibraries/resilience. Reverse the strategy order, key Outcome.match on error codes instead of _tag, and map each option.
+description: Port @julr/tenace policies to @ylcnfrht/resilience. Reverse the strategy order, key Outcome.match on error codes instead of _tag, and map each option.
 sidebar:
   order: 6
 ---
@@ -17,7 +17,7 @@ In tenace, the first strategy added is the **innermost**. Here it is the **outer
 
 ## Concept mapping
 
-| tenace 2 | @nodelibraries/resilience |
+| tenace 2 | @ylcnfrht/resilience |
 |---|---|
 | `Tenace.policy({ name })` | `new ResiliencePipelineBuilder({ name })` … `.build()` |
 | `Tenace.call(fn).withX().execute()` | build the pipeline once, then `pipeline.execute(fn)` |
@@ -63,13 +63,13 @@ In tenace, the first strategy added is the **innermost**. Here it is the **outer
 | `Tenace.map(items, fn, { policy, concurrency }).settle()` | `map(items, fn, { pipeline, concurrency, stopOnError: false })` |
 | `waitFor(fn, { interval, timeout })` | `waitFor(fn, { interval, timeout })` |
 | `TestClock` + `{ clock }` | `FakeTimeProvider` + `{ timeProvider }` |
-| `Tenace.instrument(openTelemetry())` | `instrumentOpenTelemetry()` from `@nodelibraries/resilience/otel` |
+| `Tenace.instrument(openTelemetry())` | `instrumentOpenTelemetry()` from `@ylcnfrht/resilience/otel` |
 | `Tenace.instrument(…)` / `instrumentation` option | `instrument(…)` / builder option `instrumentation` |
 | `listener(event => …)` | `onTelemetry(event => …)` |
 
 ### Error tags and codes
 
-| tenace `_tag` | @nodelibraries/resilience `code` | Class |
+| tenace `_tag` | @ylcnfrht/resilience `code` | Class |
 |---|---|---|
 | `TimeoutError` | `TIMEOUT` | `TimeoutRejectedError` |
 | `CircuitOpenError` | `CIRCUIT_OPEN`, `CIRCUIT_ISOLATED` | `BrokenCircuitError`, `IsolatedCircuitError` |
@@ -104,14 +104,14 @@ const message = Result.match(result, {
 ```
 
 </TabItem>
-<TabItem label="@nodelibraries/resilience">
+<TabItem label="@ylcnfrht/resilience">
 
 ```ts twoslash
 type User = { name: string };
 declare function fetchUser(id: string, init: { signal: AbortSignal }): Promise<User>;
 declare const id: string;
 // ---cut---
-import { Outcome, ResiliencePipelineBuilder, isTimeoutError } from '@nodelibraries/resilience';
+import { Outcome, ResiliencePipelineBuilder, isTimeoutError } from '@ylcnfrht/resilience';
 
 const pipeline = new ResiliencePipelineBuilder({ name: 'users.get' })
   .addCircuitBreaker({ consecutiveFailures: 5, breakDuration: '30s' })
@@ -166,14 +166,14 @@ const user = await Tenace.call(() => findUser(id))
 ```
 
 </TabItem>
-<TabItem label="@nodelibraries/resilience">
+<TabItem label="@ylcnfrht/resilience">
 
 ```ts twoslash
 type User = { name: string };
 declare const db: { find(id: string): Promise<User | undefined> };
 declare const id: string;
 // ---cut---
-import { Outcome, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { Outcome, ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 class NotFound extends Error {
   readonly code = 'NOT_FOUND' as const;
@@ -213,10 +213,10 @@ const refund = Tenace.policy().with(paymentsApi).withRetry({ retries: 2 });
 ```
 
 </TabItem>
-<TabItem label="@nodelibraries/resilience">
+<TabItem label="@ylcnfrht/resilience">
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const paymentsApi = new ResiliencePipelineBuilder({ name: 'payments' })
   .addCircuitBreaker({ failureRatio: 0.5, samplingCount: 20, minimumThroughput: 20 })
@@ -250,11 +250,11 @@ const result = await done; // a TimeoutError
 ```
 
 </TabItem>
-<TabItem label="@nodelibraries/resilience">
+<TabItem label="@ylcnfrht/resilience">
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
-import { FakeTimeProvider } from '@nodelibraries/resilience/testing';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
+import { FakeTimeProvider } from '@ylcnfrht/resilience/testing';
 
 const time = new FakeTimeProvider();
 const pipeline = new ResiliencePipelineBuilder().addRetry({ maxRetryAttempts: 2, delay: '10s' }).addTimeout('1s').build();

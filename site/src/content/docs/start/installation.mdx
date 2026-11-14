@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Install @nodelibraries/resilience with npm, pnpm, yarn or bun, pick an entry point, or load it from a CDN with a script tag.
+description: Install @ylcnfrht/resilience with npm, pnpm, yarn or bun, pick an entry point, or load it from a CDN with a script tag.
 sidebar:
   order: 2
 ---
@@ -10,22 +10,22 @@ import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 <Tabs syncKey="pm">
   <TabItem label="npm">
     ```sh
-    npm i @nodelibraries/resilience
+    npm i @ylcnfrht/resilience
     ```
   </TabItem>
   <TabItem label="pnpm">
     ```sh
-    pnpm add @nodelibraries/resilience
+    pnpm add @ylcnfrht/resilience
     ```
   </TabItem>
   <TabItem label="yarn">
     ```sh
-    yarn add @nodelibraries/resilience
+    yarn add @ylcnfrht/resilience
     ```
   </TabItem>
   <TabItem label="bun">
     ```sh
-    bun add @nodelibraries/resilience
+    bun add @ylcnfrht/resilience
     ```
   </TabItem>
 </Tabs>
@@ -48,12 +48,12 @@ Both builds ship with their own type declarations, resolved through `exports`:
 <Tabs syncKey="module">
   <TabItem label="ESM">
     ```ts
-    import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+    import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
     ```
   </TabItem>
   <TabItem label="CommonJS">
     ```js
-    const { ResiliencePipelineBuilder } = require('@nodelibraries/resilience');
+    const { ResiliencePipelineBuilder } = require('@ylcnfrht/resilience');
     ```
   </TabItem>
 </Tabs>
@@ -67,20 +67,20 @@ Integrations live in subpaths, so the main entry never pulls in framework code.
 
 | Import | Contents |
 |---|---|
-| `@nodelibraries/resilience` | Builders, every strategy, outcomes, errors, registry, telemetry, batches, `createStats` |
-| `@nodelibraries/resilience/outcome` | `Outcome` helpers and error classes only, for code that just handles results |
-| `@nodelibraries/resilience/testing` | `FakeTimeProvider` |
-| `@nodelibraries/resilience/fetch` | [`createResilientFetch()`](/integrations/fetch/) |
-| `@nodelibraries/resilience/axios` | [`attachResilience()`](/integrations/axios/) |
-| `@nodelibraries/resilience/http` | [Express/Connect and Hono middleware](/integrations/express-and-hono/), `describeResilienceError()` |
-| `@nodelibraries/resilience/fastify` | [Fastify plugin](/integrations/fastify/) |
-| `@nodelibraries/resilience/koa` | [Koa middleware](/integrations/koa/) |
-| `@nodelibraries/resilience/nestjs` | [NestJS module and decorators](/integrations/nestjs/) |
-| `@nodelibraries/resilience/redis` | [Redis stores and limiters](/integrations/redis/) |
-| `@nodelibraries/resilience/adapters` | [rate-limiter-flexible](/integrations/adapters/) |
-| `@nodelibraries/resilience/otel` | [OpenTelemetry](/integrations/opentelemetry/) |
-| `@nodelibraries/resilience/prometheus` | [Prometheus](/integrations/prometheus/) |
-| `@nodelibraries/resilience/hystrix` | [Hystrix dashboard stream](/integrations/hystrix/) |
+| `@ylcnfrht/resilience` | Builders, every strategy, outcomes, errors, registry, telemetry, batches, `createStats` |
+| `@ylcnfrht/resilience/outcome` | `Outcome` helpers and error classes only, for code that just handles results |
+| `@ylcnfrht/resilience/testing` | `FakeTimeProvider` |
+| `@ylcnfrht/resilience/fetch` | [`createResilientFetch()`](/integrations/fetch/) |
+| `@ylcnfrht/resilience/axios` | [`attachResilience()`](/integrations/axios/) |
+| `@ylcnfrht/resilience/http` | [Express/Connect and Hono middleware](/integrations/express-and-hono/), `describeResilienceError()` |
+| `@ylcnfrht/resilience/fastify` | [Fastify plugin](/integrations/fastify/) |
+| `@ylcnfrht/resilience/koa` | [Koa middleware](/integrations/koa/) |
+| `@ylcnfrht/resilience/nestjs` | [NestJS module and decorators](/integrations/nestjs/) |
+| `@ylcnfrht/resilience/redis` | [Redis stores and limiters](/integrations/redis/) |
+| `@ylcnfrht/resilience/adapters` | [rate-limiter-flexible](/integrations/adapters/) |
+| `@ylcnfrht/resilience/otel` | [OpenTelemetry](/integrations/opentelemetry/) |
+| `@ylcnfrht/resilience/prometheus` | [Prometheus](/integrations/prometheus/) |
+| `@ylcnfrht/resilience/hystrix` | [Hystrix dashboard stream](/integrations/hystrix/) |
 
 ## Optional peer dependencies
 
@@ -105,14 +105,14 @@ A minified IIFE build of the main entry is published at `dist/browser/resilience
 `window.resilience`:
 
 ```html
-<script src="https://unpkg.com/@nodelibraries/resilience"></script>
+<script src="https://unpkg.com/@ylcnfrht/resilience"></script>
 <script>
   const { retry } = window.resilience;
   retry(() => fetch('/api/health'), { maxRetryAttempts: 3, delay: 500 }).then(console.log);
 </script>
 ```
 
-`https://cdn.jsdelivr.net/npm/@nodelibraries/resilience` serves the same file.
+`https://cdn.jsdelivr.net/npm/@ylcnfrht/resilience` serves the same file.
 
 <Aside type="caution">
 The script-tag build contains only the main entry. Subpaths such as `/fetch` or `/testing` need a bundler or an

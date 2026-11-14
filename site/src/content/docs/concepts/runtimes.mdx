@@ -12,7 +12,7 @@ The core has no static `node:` imports and no dependencies, so the same build ru
 | Feature | Needs | Without it |
 |---|---|---|
 | [Deadline propagation](/concepts/context-and-signals/), `getResilienceSignal()`, `getResilienceContext()` | `node:async_hooks` (`AsyncLocalStorage`) | Nested pipelines don't inherit the outer signal; the two getters return `undefined`. Pass `signal` explicitly. |
-| Telemetry on the `@nodelibraries/resilience` diagnostics channel | `node:diagnostics_channel` | Nothing is published there. `onTelemetry()` still works everywhere. |
+| Telemetry on the `@ylcnfrht/resilience` diagnostics channel | `node:diagnostics_channel` | Nothing is published there. `onTelemetry()` still works everywhere. |
 | `unrefTimers: true`, `unrefSystemTime` | timers with an `unref()` method | Same as the normal clock: pending timers behave as usual. |
 
 Everything else (every strategy, typed errors, `FakeTimeProvider`, the registry, batches, `/fetch`) only uses standard JavaScript: `setTimeout`, `AbortController`, `AbortSignal`, `Promise`, `Map`, `DOMException`.
@@ -45,11 +45,11 @@ Everything works. Two things are worth knowing:
 
 ## Bun
 
-Bun provides `process.getBuiltinModule`, `AsyncLocalStorage`, `diagnostics_channel` and `unref()`, so it behaves like Node. Install with `bun add @nodelibraries/resilience`. The Express/Connect and Hono middleware from `/http` work as on Node.
+Bun provides `process.getBuiltinModule`, `AsyncLocalStorage`, `diagnostics_channel` and `unref()`, so it behaves like Node. Install with `bun add @ylcnfrht/resilience`. The Express/Connect and Hono middleware from `/http` work as on Node.
 
 ## Deno
 
-Import from npm: `import { ResiliencePipelineBuilder } from 'npm:@nodelibraries/resilience'`, or add it to `deno.json`. `AsyncLocalStorage` and `diagnostics_channel` come from Deno's Node compatibility layer through `process.getBuiltinModule` (Deno ≥ 2.1). `unrefTimers` works on Deno ≥ 2.8, whose global `setTimeout` returns a `Timeout` with `unref()`. On older releases it returns a number, so `unrefTimers` has no effect and a pending delay keeps the process alive.
+Import from npm: `import { ResiliencePipelineBuilder } from 'npm:@ylcnfrht/resilience'`, or add it to `deno.json`. `AsyncLocalStorage` and `diagnostics_channel` come from Deno's Node compatibility layer through `process.getBuiltinModule` (Deno ≥ 2.1). `unrefTimers` works on Deno ≥ 2.8, whose global `setTimeout` returns a `Timeout` with `unref()`. On older releases it returns a number, so `unrefTimers` has no effect and a pending delay keeps the process alive.
 
 ## Cloudflare Workers
 
@@ -91,7 +91,7 @@ Each subpath (`/fetch`, `/testing`, `/nestjs`…) has an ESM and a CommonJS buil
 An app that loads both the ESM and the CommonJS build (or two versions of the package) gets two copies of the classes. The library is built for that:
 
 - Errors and outcomes are recognised by registered symbols, not `instanceof`. Use `isTimeoutError()`, `isBrokenCircuitError()`, `isResilienceError()`, `Outcome.is()` and `describeResilienceError()`, which work across copies; `instanceof TimeoutRejectedError` only matches its own copy.
-- `onTelemetry()` only sees events from the copy it was imported from. A subscriber on the `@nodelibraries/resilience` diagnostics channel sees events from every copy.
+- `onTelemetry()` only sees events from the copy it was imported from. A subscriber on the `@ylcnfrht/resilience` diagnostics channel sees events from every copy.
 - `AsyncLocalStorage` is per copy: a pipeline from one copy doesn't propagate its deadline into a pipeline from the other.
 
 ### The script-tag build
@@ -99,20 +99,20 @@ An app that loads both the ESM and the CommonJS build (or two versions of the pa
 `scripts/browser.mjs` bundles the main ESM entry with esbuild into one minified IIFE (`format: 'iife'`, `target: 'es2022'`, `platform: 'browser'`) with a source map. It is what `unpkg` and `jsdelivr` serve for the bare package URL, and it exposes a global `resilience`:
 
 ```html
-<script src="https://unpkg.com/@nodelibraries/resilience"></script>
+<script src="https://unpkg.com/@ylcnfrht/resilience"></script>
 <script>
   const { ResiliencePipelineBuilder, retry } = window.resilience;
   retry(() => fetch('/api/health'), { maxRetryAttempts: 3, delay: 500 }).then(console.log);
 </script>
 ```
 
-It contains the main entry only: everything in `@nodelibraries/resilience`, nothing from the subpaths. For `/fetch`, `/testing` or the others, use a bundler or an ESM CDN.
+It contains the main entry only: everything in `@ylcnfrht/resilience`, nothing from the subpaths. For `/fetch`, `/testing` or the others, use a bundler or an ESM CDN.
 
 ## Subpaths by runtime
 
 | Subpath | Runs on | Notes |
 |---|---|---|
-| `@nodelibraries/resilience`, `/outcome`, `/testing` | everywhere | |
+| `@ylcnfrht/resilience`, `/outcome`, `/testing` | everywhere | |
 | `/fetch` | everywhere `fetch` exists | Node, Bun, Deno, Workers, browsers |
 | `/axios` | wherever axios runs | in bundled browser code pass `getAdapter` |
 | `/http` | Express/Connect (Node, Bun); Hono (every runtime) | `describeResilienceError()` is runtime-neutral |

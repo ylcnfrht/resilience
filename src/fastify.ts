@@ -18,8 +18,8 @@ interface FastifyInstanceLike {
   addHook(...args: any[]): unknown;
 }
 
-const CONTEXT = Symbol('@nodelibraries/resilience.context');
-const PROPERTIES = Symbol('@nodelibraries/resilience.properties');
+const CONTEXT = Symbol('@ylcnfrht/resilience.context');
+const PROPERTIES = Symbol('@ylcnfrht/resilience.properties');
 
 /**
  * Fastify plugin: request timeout with deadline propagation, load shedding, per-key rate limit with RateLimit-* headers,
@@ -82,4 +82,4 @@ export function fastifyResilience(instance: FastifyInstanceLike, options: Inboun
 }
 
 // Same effect as wrapping with fastify-plugin: hooks land on the parent instance, not an encapsulated child.
-Object.assign(fastifyResilience, { [Symbol.for('skip-override')]: true, [Symbol.for('fastify.display-name')]: '@nodelibraries/resilience' });
+Object.assign(fastifyResilience, { [Symbol.for('skip-override')]: true, [Symbol.for('fastify.display-name')]: '@ylcnfrht/resilience' });

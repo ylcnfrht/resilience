@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'preact/hooks';
-import { TokenBucket, WindowCounter } from '@nodelibraries/resilience';
+import { TokenBucket, WindowCounter } from '@ylcnfrht/resilience';
 import Range from './Range.tsx';
 import { type Mark, type Pattern, requestStream, runLimiter, worstSpan } from './limiter-sims.ts';
 import './demo.css';

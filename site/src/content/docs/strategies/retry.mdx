@@ -20,7 +20,7 @@ Don't retry what can't succeed the second time: validation errors, 4xx responses
 ```ts twoslash
 declare function fetchUser(id: string, signal: AbortSignal): Promise<{ id: string }>;
 // ---cut---
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const pipeline = new ResiliencePipelineBuilder()
   .addRetry({
@@ -40,7 +40,7 @@ const user = await pipeline.execute(({ signal }) => fetchUser('42', signal));
 ```ts twoslash
 declare function fetchUser(id: string, signal: AbortSignal): Promise<{ id: string }>;
 // ---cut---
-import { PipelineBuilder, retryStrategy } from '@nodelibraries/resilience';
+import { PipelineBuilder, retryStrategy } from '@ylcnfrht/resilience';
 
 const pipeline = new PipelineBuilder()
   .add(retryStrategy({ maxRetryAttempts: 3, backoffType: 'exponential', delay: '200ms', useJitter: 'full' }))
@@ -55,7 +55,7 @@ const user = await pipeline.execute(({ signal }) => fetchUser('42', signal));
 ```ts twoslash
 declare function fetchUser(id: string, signal: AbortSignal): Promise<{ id: string }>;
 // ---cut---
-import { retry } from '@nodelibraries/resilience';
+import { retry } from '@ylcnfrht/resilience';
 
 const user = await retry(({ signal }) => fetchUser('42', signal), {
   maxRetryAttempts: 3,
@@ -120,7 +120,7 @@ Pass `randomizer: () => number` to make jitter deterministic in tests.
 The `backoff` helpers are plain functions of the attempt number. Use them as a `delayGenerator`, in `waitFor({ interval })`, or in your own loops:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, backoff } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, backoff } from '@ylcnfrht/resilience';
 
 // Exponential with a custom factor, cap and full jitter.
 const exp = backoff.exponential({ delay: '100ms', factor: 3, maxDelay: '10s', useJitter: 'full' });
@@ -150,8 +150,8 @@ Each returned function accepts a number or anything with an `attemptNumber` (suc
 Errors can carry a `retryAfter` in milliseconds. `RateLimiterRejectedError` does. With `respectRetryAfter: true` (the default), retry waits **at least** that long, still capped by `maxDelay`. For HTTP responses, read the header in a `delayGenerator`:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, PredicateBuilder } from '@nodelibraries/resilience';
-import { retryAfterMs } from '@nodelibraries/resilience/fetch';
+import { ResiliencePipelineBuilder, PredicateBuilder } from '@ylcnfrht/resilience';
+import { retryAfterMs } from '@ylcnfrht/resilience/fetch';
 
 const pipeline = new ResiliencePipelineBuilder<Response>()
   .addRetry({
@@ -206,7 +206,7 @@ Throw `NonRetryableError` from the callback when you know retrying is pointless.
 ```ts twoslash
 declare function charge(amount: number, signal: AbortSignal): Promise<Response>;
 // ---cut---
-import { retry, NonRetryableError } from '@nodelibraries/resilience';
+import { retry, NonRetryableError } from '@ylcnfrht/resilience';
 
 const res = await retry(async ({ signal }) => {
   const res = await charge(100, signal);
@@ -225,7 +225,7 @@ A `BrokenCircuitError` (`CIRCUIT_OPEN` or `CIRCUIT_ISOLATED`) always stops retry
 ### Calls that must not run twice
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 const pipeline = new ResiliencePipelineBuilder().addRetry().build();
 declare function pay(signal: AbortSignal): Promise<void>;
 // ---cut---
@@ -239,7 +239,7 @@ With `idempotent: false`, retry only repeats a call that **never started**: one 
 Each caller retrying 3 times means up to 4× the load, exactly when the dependency is weakest. A `RetryBudget` caps retries relative to traffic. Share one instance across every pipeline that calls the same dependency.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, RetryBudget } from '@nodelibraries/resilience';
+import { ResiliencePipelineBuilder, RetryBudget } from '@ylcnfrht/resilience';
 
 const inventoryBudget = new RetryBudget({ ratio: 0.2, minRetriesPerSecond: 10 }); // at most +20% load
 

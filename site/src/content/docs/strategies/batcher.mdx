@@ -11,7 +11,7 @@ import { Aside } from '@astrojs/starlight/components';
 `createBatcher` collects single-item `load()` calls for a few milliseconds and sends them as one batched request: 100 `getUser(id)` calls become one `SELECT ... WHERE id IN (...)`. It is DataLoader's (and bottleneck's `Batcher`) idea, with two additions: each batch runs through a resilience pipeline as a unit, and cancellation works per caller. Use it to fix N+1 queries in GraphQL resolvers or fan-out code, or to fit a bulk API. Don't use it when calls are rare (each one waits up to `maxWait` for company), or when the backend has no batch endpoint.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, createBatcher } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder, createBatcher } from '@nodelibraries/resilience';
 interface User { id: string; name: string }
 declare const db: { usersByIds(ids: string[], options: { signal: AbortSignal }): Promise<User[]> };
 // ---cut---
@@ -52,7 +52,7 @@ const [a, b, c] = await Promise.all([users.load('1'), users.load('2'), users.loa
 Either way, a result that is an `Error` instance rejects only that item; the others resolve. If `run` throws (after the pipeline's retries), every item of the batch rejects with that error.
 
 ```ts twoslash
-import { createBatcher } from 'resilience-pipeline';
+import { createBatcher } from '@nodelibraries/resilience';
 interface Price { sku: string; amount: number }
 declare function priceApi(skus: string[], signal: AbortSignal): Promise<Array<Price | null>>;
 // ---cut---

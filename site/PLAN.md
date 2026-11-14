@@ -1,4 +1,4 @@
-# resilience-pipeline doküman sitesi: plan
+# @nodelibraries/resilience doküman sitesi: plan
 
 Hedef: tenace.julr.dev'den daha iyi bir site. Tenace iyi bir referans: Astro + Starlight, kısa ve kod ağırlıklı metinler,
 sekmeli kod örnekleri, strateji sayfaları, arama. Eksikleri: interaktif hiçbir şey yok, diyagram yok, karşılaştırma ve
@@ -30,7 +30,7 @@ geçiş rehberi yok, kod örnekleri tip kontrolünden geçmiyor, API referansı 
 - **Yayın:** Cloudflare (Workers static assets veya Pages), alt alan adı ferhatyalcin.dev. Yayın en son, onayla.
 
 ## Bilgi mimarisi (üst menü: Docs · Strategies · Integrations · Guides · Reference · Playground)
-- **Başlangıç:** Introduction, Installation, Quick start (5 dk), Why resilience-pipeline (karşılaştırma özeti)
+- **Başlangıç:** Introduction, Installation, Quick start (5 dk), Why @nodelibraries/resilience (karşılaştırma özeti)
 - **Kavramlar:**
   - Pipelines & strategy order
   - What counts as a failure (varsayılanlar)
@@ -86,7 +86,7 @@ geçiş rehberi yok, kod örnekleri tip kontrolünden geçmiyor, API referansı 
 3. **"One pipeline, every failure mode":** 6 kart (Failures, Overload, Latency, Distributed, Typed errors, Testing). Her kartta
    kısa kod ve "Read more".
 4. **Sekmeli "In code":** HTTP, Database, NestJS, Typed errors, Streaming, Testing.
-5. **"Only in resilience-pipeline":** hedging, adaptive concurrency, deadline propagation, retry budget, Postgres sorgu iptali
+5. **"Only in @nodelibraries/resilience":** hedging, adaptive concurrency, deadline propagation, retry budget, Postgres sorgu iptali
    tarifi, typed errors + Polly API birlikte.
 6. **Karşılaştırma tablosu teaser'ı** (cockatiel / opossum / tenace / p-retry) + "Full comparison" linki.
 7. **Toolbox:** tüm API'lerin kategorili listesi.

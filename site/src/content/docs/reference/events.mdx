@@ -10,7 +10,7 @@ import { Aside } from '@astrojs/starlight/components';
 Every event reaches three places at once:
 
 - `onTelemetry(listener)` listeners, in every runtime;
-- the `resilience-pipeline` [`diagnostics_channel`](https://nodejs.org/api/diagnostics_channel.html) on Node, Bun and Deno;
+- the `@nodelibraries/resilience` [`diagnostics_channel`](https://nodejs.org/api/diagnostics_channel.html) on Node, Bun and Deno;
 - the adapters built on them: `/otel`, `/prometheus`, `createStats()`, `/hystrix`.
 
 Each message is a `TelemetryEvent`: `{ event, source: { pipelineName, strategyName, tags? }, context, args }`. The tables list `args`. Events are only built when someone listens, and a pipeline built with `telemetry: false` emits none.
@@ -18,7 +18,7 @@ Each message is a `TelemetryEvent`: `{ event, source: { pipelineName, strategyNa
 The strategy-level `on*` callbacks receive the same `args` object, so you can move code between a callback and a listener.
 
 ```ts twoslash
-import { onTelemetry } from 'resilience-pipeline';
+import { onTelemetry } from '@nodelibraries/resilience';
 
 const off = onTelemetry(({ event, source, args }) => {
   if (event === 'OnCircuitOpened') console.warn(`${source.pipelineName}: circuit opened`, args);

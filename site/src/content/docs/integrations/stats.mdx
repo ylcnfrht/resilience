@@ -10,7 +10,7 @@ import { Aside } from '@astrojs/starlight/components';
 `createStats()` keeps rolling counts and latency percentiles in memory, from the same telemetry the metric exporters use. Use it for a health endpoint, a periodic log line, an admin page or a test assertion, when you don't run Prometheus or OpenTelemetry (or want the numbers inside the process). It runs anywhere, browsers included.
 
 ```ts twoslash
-import { createStats } from 'resilience-pipeline';
+import { createStats } from '@nodelibraries/resilience';
 
 const stats = createStats({ pipeline: 'payments', window: '1m' });
 
@@ -62,7 +62,7 @@ console.log(`${s.failures}/${s.executions} failed, p99 ${s.latency.p99.toFixed(1
 ## Logging on an interval
 
 ```ts twoslash
-import { createStats } from 'resilience-pipeline';
+import { createStats } from '@nodelibraries/resilience';
 declare const log: { info(o: object): void };
 // ---cut---
 const stats = createStats({ pipeline: ['payments', 'inventory'] });
@@ -79,7 +79,7 @@ Timers are unref'd: they don't keep the process alive.
 ## Health endpoint
 
 ```ts twoslash
-import { createStats } from 'resilience-pipeline';
+import { createStats } from '@nodelibraries/resilience';
 // ---cut---
 const stats = createStats({ pipeline: 'payments', window: '1m' });
 

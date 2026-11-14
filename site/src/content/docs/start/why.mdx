@@ -1,6 +1,6 @@
 ---
-title: Why resilience-pipeline
-description: What sets resilience-pipeline apart — Polly v8 API, hedging, adaptive concurrency, deadline propagation, typed errors, zero deps — and where it doesn't fit.
+title: Why @nodelibraries/resilience
+description: What sets @nodelibraries/resilience apart — Polly v8 API, hedging, adaptive concurrency, deadline propagation, typed errors, zero deps — and where it doesn't fit.
 sidebar:
   order: 4
 ---
@@ -19,7 +19,7 @@ and `CancellationToken` is an `AbortSignal`. See [Migrating from Polly](/migrati
 (p99) on reads without adding a timeout.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 // ---cut---
 const search = new ResiliencePipelineBuilder()
   .addHedging({ delay: '150ms', maxHedgedAttempts: 1 }) // second request after 150 ms; the loser is aborted
@@ -30,7 +30,7 @@ const search = new ResiliencePipelineBuilder()
 and AIMD algorithms known from Netflix's concurrency-limits. You stop guessing "how many parallel calls can this database take".
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 // ---cut---
 const db = new ResiliencePipelineBuilder()
   .addAdaptiveConcurrencyLimiter({ algorithm: 'gradient2', minLimit: 5, maxLimit: 200 })

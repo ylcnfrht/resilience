@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'preact/hooks';
-import { CircuitBreakerStateProvider, PipelineBuilder, circuitBreakerStrategy, isBrokenCircuitError } from 'resilience-pipeline';
+import { CircuitBreakerStateProvider, PipelineBuilder, circuitBreakerStrategy, isBrokenCircuitError } from '@nodelibraries/resilience';
 import Range from './Range.tsx';
 import { seeded, sleep } from './sim.ts';
 import './demo.css';

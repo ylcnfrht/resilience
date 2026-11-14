@@ -10,13 +10,13 @@ import { Aside } from '@astrojs/starlight/components';
 `instrumentPrometheus()` turns the telemetry of **every pipeline in the process** into Prometheus metrics with [prom-client](https://github.com/siimon/prom-client). One call at startup; serve the registry as usual.
 
 ```sh
-npm i resilience-pipeline prom-client   # prom-client >= 14 (optional peer dependency)
+npm i @nodelibraries/resilience prom-client   # prom-client >= 14 (optional peer dependency)
 ```
 
 ```ts
 import express from 'express';
 import { register } from 'prom-client';
-import { instrumentPrometheus } from 'resilience-pipeline/prometheus';
+import { instrumentPrometheus } from '@nodelibraries/resilience/prometheus';
 
 instrumentPrometheus(); // once, at startup
 

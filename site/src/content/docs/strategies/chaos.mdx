@@ -12,7 +12,7 @@ Chaos strategies make a healthy dependency look broken, on purpose and at a cont
 <Tabs syncKey="builder">
 <TabItem label="ResiliencePipelineBuilder">
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const pipeline = new ResiliencePipelineBuilder()
   .addRetry({ maxRetryAttempts: 3 })
@@ -24,7 +24,7 @@ const pipeline = new ResiliencePipelineBuilder()
 </TabItem>
 <TabItem label="PipelineBuilder">
 ```ts twoslash
-import { PipelineBuilder, chaosFaultStrategy, chaosLatencyStrategy, retryStrategy, timeoutStrategy } from 'resilience-pipeline';
+import { PipelineBuilder, chaosFaultStrategy, chaosLatencyStrategy, retryStrategy, timeoutStrategy } from '@nodelibraries/resilience';
 
 const pipeline = new PipelineBuilder()
   .add(retryStrategy({ maxRetryAttempts: 3 }))
@@ -50,7 +50,7 @@ Add chaos strategies **last** (innermost), right before the callback, so every s
 Each execution: if enabled, draw `randomizer()`; inject when it's below the injection rate. A generator that returns `undefined` (fault or outcome) skips injection for that call. An abort during injected latency fails the execution with the abort reason.
 
 ```ts twoslash
-import { Outcome, ResiliencePipelineBuilder, TimeoutRejectedError, weighted } from 'resilience-pipeline';
+import { Outcome, ResiliencePipelineBuilder, TimeoutRejectedError, weighted } from '@nodelibraries/resilience';
 
 const pipeline = new ResiliencePipelineBuilder<Response>()
   // A fake 503 answer, as if the API were overloaded.
@@ -120,7 +120,7 @@ The strategies raise no errors of their own: they raise whatever you inject.
 `setGlobalChaos(options)` injects faults or latency into **every** pipeline in the process, without touching their configuration. It runs before each callback attempt, so retries and hedges are hit too. Use it for game days and soak tests: "does the whole app survive a slow database?". It returns a function that turns it off.
 
 ```ts twoslash
-import { setGlobalChaos } from 'resilience-pipeline';
+import { setGlobalChaos } from '@nodelibraries/resilience';
 
 const stop = setGlobalChaos({
   injectionRate: 0.1,
@@ -148,7 +148,7 @@ Never ship a chaos strategy that is on by default with a meaningful rate. Gate i
 </Aside>
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 declare const flags: { isOn(name: string): boolean; number(name: string): number };
 // ---cut---
 const pipeline = new ResiliencePipelineBuilder()

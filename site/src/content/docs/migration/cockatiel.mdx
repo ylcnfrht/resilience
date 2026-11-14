@@ -1,6 +1,6 @@
 ---
 title: From cockatiel
-description: Move cockatiel policies (retry, circuitBreaker, timeout, bulkhead, fallback, wrap) to a resilience-pipeline builder, with the defaults that differ.
+description: Move cockatiel policies (retry, circuitBreaker, timeout, bulkhead, fallback, wrap) to a @nodelibraries/resilience builder, with the defaults that differ.
 sidebar:
   order: 2
 ---
@@ -13,7 +13,7 @@ Both libraries descend from Polly, so the concepts map one to one. The main chan
 
 ## Concept mapping
 
-| cockatiel 4 | resilience-pipeline |
+| cockatiel 4 | @nodelibraries/resilience |
 |---|---|
 | `wrap(retry, breaker, timeout)` | `builder.addRetry(…).addCircuitBreaker(…).addTimeout(…)` (same order) |
 | `retry(policy, { maxAttempts })` | `addRetry({ maxRetryAttempts })` (both count retries, not attempts) |
@@ -69,12 +69,12 @@ const data = await policy.execute(({ signal }) => fetch(url, { signal }));
 ```
 
 </TabItem>
-<TabItem label="resilience-pipeline">
+<TabItem label="@nodelibraries/resilience">
 
 ```ts twoslash
 declare const url: string;
 // ---cut---
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const pipeline = new ResiliencePipelineBuilder()
   .addRetry({ maxRetryAttempts: 3, backoffType: 'exponential', useJitter: true, delay: 128, maxDelay: '30s' })
@@ -106,13 +106,13 @@ const retryPolicy = retry(policy, { maxAttempts: 5, backoff: new ConstantBackoff
 ```
 
 </TabItem>
-<TabItem label="resilience-pipeline">
+<TabItem label="@nodelibraries/resilience">
 
 ```ts twoslash
 class NetworkError extends Error {}
 class HttpError extends Error { statusCode = 500 }
 // ---cut---
-import { PredicateBuilder, ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { PredicateBuilder, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const pipeline = new ResiliencePipelineBuilder<Response>()
   .addRetry({
@@ -146,14 +146,14 @@ breaker.onBreak(() => save(breaker.toJSON()));
 ```
 
 </TabItem>
-<TabItem label="resilience-pipeline">
+<TabItem label="@nodelibraries/resilience">
 
 ```ts twoslash
-import type { CircuitSnapshot } from 'resilience-pipeline';
+import type { CircuitSnapshot } from '@nodelibraries/resilience';
 declare const saved: CircuitSnapshot | undefined;
 declare function save(state: CircuitSnapshot): void;
 // ---cut---
-import { CircuitBreakerStateProvider, ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { CircuitBreakerStateProvider, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const state = new CircuitBreakerStateProvider();
 const pipeline = new ResiliencePipelineBuilder()
@@ -188,13 +188,13 @@ const rates = await policy.execute(() => getRates());
 ```
 
 </TabItem>
-<TabItem label="resilience-pipeline">
+<TabItem label="@nodelibraries/resilience">
 
 ```ts twoslash
 declare const cachedRates: number[];
 declare function getRates(): Promise<number[]>;
 // ---cut---
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const pipeline = new ResiliencePipelineBuilder<number[]>()
   .addFallback({ fallbackAction: () => cachedRates }) // also catches the full bulkhead
@@ -222,10 +222,10 @@ class Db {
 ```
 
 </TabItem>
-<TabItem label="resilience-pipeline">
+<TabItem label="@nodelibraries/resilience">
 
 ```ts
-import { getResilienceSignal, resilient } from 'resilience-pipeline';
+import { getResilienceSignal, resilient } from '@nodelibraries/resilience';
 
 class Db {
   @resilient(pipeline)

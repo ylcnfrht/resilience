@@ -4,7 +4,7 @@ import { Code, Tabs, TabItem } from '@astrojs/starlight/components';
 import SignalField from '../components/landing/SignalField.astro';
 import Illustration from '../components/landing/Illustration.astro';
 
-const heroCode = `import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+const heroCode = `import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const payments = new ResiliencePipelineBuilder({ name: 'payments' })
   .addFallback({ fallbackAction: () => queueForLater() })
@@ -123,7 +123,7 @@ const toolbox = [
 ];
 
 const inCode = {
-  http: `import { createResilientFetch } from 'resilience-pipeline/fetch';
+  http: `import { createResilientFetch } from '@nodelibraries/resilience/fetch';
 
 // Per-host breakers, retries that honour Retry-After, idempotency-aware POSTs.
 const http = createResilientFetch({ name: 'github', retryOn: [429, 503] });
@@ -145,7 +145,7 @@ for await (const token of pipeline.executeStream(({ signal }) =>
   openai.stream(prompt, { signal }))) {
   render(token);
 }`,
-  testing: `import { FakeTimeProvider } from 'resilience-pipeline/testing';
+  testing: `import { FakeTimeProvider } from '@nodelibraries/resilience/testing';
 
 const time = new FakeTimeProvider();
 const pipeline = new ResiliencePipelineBuilder({ timeProvider: time })
@@ -159,7 +159,7 @@ await done;`,
 };
 ---
 
-<StarlightPage frontmatter={{ title: 'resilience-pipeline', description: 'Resilience pipelines for TypeScript: retry, circuit breaker, timeout, hedging, rate limiting and typed errors for every runtime.', template: 'splash', pagefind: false }}>
+<StarlightPage frontmatter={{ title: '@nodelibraries/resilience', description: 'Resilience pipelines for TypeScript: retry, circuit breaker, timeout, hedging, rate limiting and typed errors for every runtime.', template: 'splash', pagefind: false }}>
   <div class="rp-landing not-content">
     <section class="hero">
       <SignalField />
@@ -173,8 +173,8 @@ await done;`,
           <a class="btn primary" href="/start/quick-start/">Get started</a>
           <a class="btn ghost" href="/playground/">Open the playground</a>
         </div>
-        <button class="install" type="button" data-copy="npm i resilience-pipeline">
-          <span class="prompt">$</span> npm i resilience-pipeline <span class="copy">copy</span>
+        <button class="install" type="button" data-copy="npm i @nodelibraries/resilience">
+          <span class="prompt">$</span> npm i @nodelibraries/resilience <span class="copy">copy</span>
         </button>
       </div>
       <div class="hero-code">
@@ -253,11 +253,11 @@ await done;`,
     </section>
 
     <footer class="foot">
-      <span>resilience-pipeline · MIT licensed</span>
+      <span>@nodelibraries/resilience · MIT licensed</span>
       <nav aria-label="Footer">
         <a href="/start/introduction/">Docs</a>
         <a href="/reference/changelog/">Changelog</a>
-        <a href="https://www.npmjs.com/package/resilience-pipeline">npm</a>
+        <a href="https://www.npmjs.com/package/@nodelibraries/resilience">npm</a>
       </nav>
     </footer>
   </div>

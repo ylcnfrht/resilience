@@ -10,7 +10,7 @@ import { Aside } from '@astrojs/starlight/components';
 `createResilientFetch()` returns a function with the same signature as `fetch`. Every request goes through a total timeout, retries with backoff and jitter, and a circuit breaker per host. Use it for any outbound HTTP call where you would otherwise write the same retry loop again. It needs no dependencies: it wraps `globalThis.fetch` (Node ≥ 20, Bun, Deno, Workers, browsers).
 
 ```ts twoslash
-import { createResilientFetch } from 'resilience-pipeline/fetch';
+import { createResilientFetch } from '@nodelibraries/resilience/fetch';
 
 const http = createResilientFetch({ name: 'payments' });
 
@@ -38,8 +38,8 @@ Responses come back as they are. A final `503` resolves like it does with `fetch
 ## Handling the failures
 
 ```ts twoslash
-import { createResilientFetch } from 'resilience-pipeline/fetch';
-import { isBrokenCircuitError, isTimeoutError } from 'resilience-pipeline';
+import { createResilientFetch } from '@nodelibraries/resilience/fetch';
+import { isBrokenCircuitError, isTimeoutError } from '@nodelibraries/resilience';
 
 const http = createResilientFetch({ name: 'inventory' });
 declare const cached: { stock: number };
@@ -59,7 +59,7 @@ async function stock(sku: string) {
 ## Configuration
 
 ```ts twoslash
-import { createResilientFetch } from 'resilience-pipeline/fetch';
+import { createResilientFetch } from '@nodelibraries/resilience/fetch';
 
 const http = createResilientFetch({
   name: 'payments',
@@ -96,7 +96,7 @@ const http = createResilientFetch({
 Pass `resilience` in the second argument. The type is `ResilientRequestInit`, a `RequestInit` with one more field.
 
 ```ts twoslash
-import { createResilientFetch } from 'resilience-pipeline/fetch';
+import { createResilientFetch } from '@nodelibraries/resilience/fetch';
 const http = createResilientFetch({ name: 'api' });
 declare const order: object;
 // ---cut---
@@ -135,7 +135,7 @@ A request that may have reached the server is only repeated when repeating it is
 A POST that timed out may have charged a card; retrying it could charge it twice. Send an `Idempotency-Key` when the API supports one (Stripe, Adyen and most payment APIs do):
 
 ```ts twoslash
-import { createResilientFetch } from 'resilience-pipeline/fetch';
+import { createResilientFetch } from '@nodelibraries/resilience/fetch';
 const http = createResilientFetch({ name: 'payments' });
 // ---cut---
 await http('https://api.example.com/charges', {
@@ -150,7 +150,7 @@ await http('https://api.example.com/charges', {
 `onBeforeAttempt` runs before every attempt, retries included. It gets a new `Request` (a `Request` input is cloned each time, so its body can be sent again) and the execution context. Return a replacement, or nothing to send it unchanged.
 
 ```ts twoslash
-import { createResilientFetch } from 'resilience-pipeline/fetch';
+import { createResilientFetch } from '@nodelibraries/resilience/fetch';
 declare function getAccessToken(): Promise<string>;
 // ---cut---
 const http = createResilientFetch({
@@ -177,8 +177,8 @@ To retry a `401` after the refresh, add it to `retryOn`: `retryOn: [401, 429, 50
 `standardHttpPipeline(options)` builds the same pipeline as a plain `ResiliencePipeline<Response>`, for when you want to call `fetch` yourself or add strategies around it. `isTransientHttpOutcome`, `parseRetryAfter` and `retryAfterMs` are exported too, for your own predicates.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
-import { createResilientFetch, isTransientHttpOutcome, retryAfterMs } from 'resilience-pipeline/fetch';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { createResilientFetch, isTransientHttpOutcome, retryAfterMs } from '@nodelibraries/resilience/fetch';
 
 const pipeline = new ResiliencePipelineBuilder<Response>({ name: 'search' })
   .addRetry({

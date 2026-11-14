@@ -31,12 +31,12 @@ const skipTypeDoc = process.env.SKIP_TYPEDOC === '1';
 
 export default defineConfig({
   devToolbar: { enabled: false },
-  site: 'https://resilience-pipeline.ferhatyalcin.dev',
+  site: 'https://resilience.ferhatyalcin.dev',
   outDir: process.env.ASTRO_OUT_DIR ?? './dist',
   cacheDir: process.env.ASTRO_CACHE_DIR ?? './node_modules/.astro',
   vite: {
     // Interactive components import the library straight from source, so the playground always runs the current code.
-    resolve: { alias: [{ find: /^resilience-pipeline$/, replacement: `${lib}index.ts` }, { find: /^resilience-pipeline\/(.*)$/, replacement: `${lib}$1.ts` }] },
+    resolve: { alias: [{ find: /^@nodelibraries\/resilience$/, replacement: `${lib}index.ts` }, { find: /^@nodelibraries\/resilience\/(.*)$/, replacement: `${lib}$1.ts` }] },
     server: { fs: { allow: ['..'] } },
     // ec.config.mjs pulls twoslash + the TypeScript compiler into SSR; bundling them exhausts the heap.
     ssr: { external: ['typescript', 'twoslash', 'expressive-code-twoslash', '@typescript/vfs'] },
@@ -44,20 +44,20 @@ export default defineConfig({
   integrations: [
     preact(),
     starlight({
-      title: 'resilience-pipeline',
+      title: '@nodelibraries/resilience',
       description: 'Resilience pipelines for TypeScript: retry, circuit breaker, timeout, hedging, rate limiting, typed errors — for Node, Bun, Deno, Workers and browsers.',
       logo: { src: './src/assets/logo.svg' },
       favicon: '/favicon.svg',
       head: [
-        { tag: 'meta', attrs: { property: 'og:image', content: 'https://resilience-pipeline.ferhatyalcin.dev/og.png' } },
+        { tag: 'meta', attrs: { property: 'og:image', content: 'https://resilience.ferhatyalcin.dev/og.png' } },
         { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
         { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
         { tag: 'meta', attrs: { name: 'twitter:card', content: 'summary_large_image' } },
-        { tag: 'meta', attrs: { name: 'twitter:image', content: 'https://resilience-pipeline.ferhatyalcin.dev/og.png' } },
+        { tag: 'meta', attrs: { name: 'twitter:image', content: 'https://resilience.ferhatyalcin.dev/og.png' } },
       ],
       customCss: ['@fontsource-variable/geist', '@fontsource-variable/geist-mono', './src/styles/theme.css'],
       components: { Header: './src/components/overrides/Header.astro' },
-      social: [{ icon: 'seti:npm', label: 'npm', href: 'https://www.npmjs.com/package/resilience-pipeline' }],
+      social: [{ icon: 'seti:npm', label: 'npm', href: 'https://www.npmjs.com/package/@nodelibraries/resilience' }],
       lastUpdated: false,
       pagination: true,
       tableOfContents: { minHeadingLevel: 2, maxHeadingLevel: 3 },

@@ -15,7 +15,7 @@ import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 | `createResilientFetch()` (`/fetch`, per-host breakers) | 9.1 KB | 9.3 KB |
 | `ResiliencePipelineBuilder` (every strategy) | 15.1 KB | 15.3 KB |
 
-Measured for version 0.1.3 with `scripts/size.mjs`. The package has no dependencies, so these are the whole cost.
+Measured for version 0.2.0 with `scripts/size.mjs`. The package has no dependencies, so these are the whole cost.
 
 ## How they are measured
 
@@ -23,7 +23,7 @@ Each row is a tiny entry file that imports from the built ESM output and uses th
 
 ```ts
 // 'PipelineBuilder + retry + timeout'
-import { PipelineBuilder, retryStrategy, timeoutStrategy } from 'resilience-pipeline';
+import { PipelineBuilder, retryStrategy, timeoutStrategy } from '@nodelibraries/resilience';
 new PipelineBuilder().add(retryStrategy()).add(timeoutStrategy('2s')).build();
 ```
 
@@ -43,7 +43,7 @@ Your bundler, minifier and compression will give slightly different numbers; the
 <TabItem label="PipelineBuilder (smallest)">
 
 ```ts twoslash
-import { PipelineBuilder, circuitBreakerStrategy, retryStrategy, timeoutStrategy } from 'resilience-pipeline';
+import { PipelineBuilder, circuitBreakerStrategy, retryStrategy, timeoutStrategy } from '@nodelibraries/resilience';
 
 // Only retry, circuit breaker and timeout end up in the bundle.
 const pipeline = new PipelineBuilder()
@@ -57,7 +57,7 @@ const pipeline = new PipelineBuilder()
 <TabItem label="ResiliencePipelineBuilder (everything)">
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 // The addX() shortcuts reference every strategy, so all of them are bundled.
 const pipeline = new ResiliencePipelineBuilder()
@@ -73,7 +73,7 @@ const pipeline = new ResiliencePipelineBuilder()
 - **Use `PipelineBuilder` with `xStrategy()` factories in browser and edge code.** `ResiliencePipelineBuilder` is the same builder with an `addX()` shortcut for every strategy, which is why it costs the full 15.1 KB. The two produce the same pipeline and mix freely.
 - **Use the one-liners for one-off calls.** `retry()` and `withTimeout()` build their strategy directly and skip the builder.
 - **Circuit breaker extensions are separate modules.** `circuitHealthCheck()` and `sharedCircuitState()` are only bundled when you import them.
-- **Import subpaths directly.** `resilience-pipeline/outcome` loads only the outcome helpers and error types. `/fetch`, `/axios`, `/otel`, `/prometheus`, `/redis` and the framework adapters are separate entry points and never enter a bundle that doesn't import them.
+- **Import subpaths directly.** `@nodelibraries/resilience/outcome` loads only the outcome helpers and error types. `/fetch`, `/axios`, `/otel`, `/prometheus`, `/redis` and the framework adapters are separate entry points and never enter a bundle that doesn't import them.
 - **On the server it rarely matters.** For Node services, prefer `ResiliencePipelineBuilder` for readability.
 
 Related: [Bundle size](/concepts/bundle-size/), [Runtimes](/concepts/runtimes/).

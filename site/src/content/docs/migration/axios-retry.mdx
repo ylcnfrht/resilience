@@ -1,6 +1,6 @@
 ---
 title: From axios-retry
-description: Replace axiosRetry() with attachResilience() from resilience-pipeline/axios. Option mapping, per-request config, and the new defaults (timeouts, breaker).
+description: Replace axiosRetry() with attachResilience() from @nodelibraries/resilience/axios. Option mapping, per-request config, and the new defaults (timeouts, breaker).
 sidebar:
   order: 5
 ---
@@ -9,7 +9,7 @@ import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
 **Who this is for:** apps that call `axiosRetry(instance, options)` and want backoff with jitter, `Retry-After`, timeouts per attempt and a circuit breaker per host, without touching their call sites.
 
-`attachResilience(instance, options)` from `resilience-pipeline/axios` takes the same place as `axiosRetry(instance, options)`: one call per axios instance, interceptors and call sites unchanged, per-request overrides on the request config. The difference is what you get without options: axios-retry retries 3 times with no delay; `attachResilience` adds a total timeout, a timeout per attempt, exponential backoff with jitter, and a circuit breaker per host. See the [axios integration](/integrations/axios/) for the full reference.
+`attachResilience(instance, options)` from `@nodelibraries/resilience/axios` takes the same place as `axiosRetry(instance, options)`: one call per axios instance, interceptors and call sites unchanged, per-request overrides on the request config. The difference is what you get without options: axios-retry retries 3 times with no delay; `attachResilience` adds a total timeout, a timeout per attempt, exponential backoff with jitter, and a circuit breaker per host. See the [axios integration](/integrations/axios/) for the full reference.
 
 ## Option mapping
 
@@ -47,11 +47,11 @@ axiosRetry(api, { retries: 3, retryDelay: axiosRetry.exponentialDelay });
 ```
 
 </TabItem>
-<TabItem label="resilience-pipeline">
+<TabItem label="@nodelibraries/resilience">
 
 ```ts
 import axios from 'axios';
-import { attachResilience } from 'resilience-pipeline/axios';
+import { attachResilience } from '@nodelibraries/resilience/axios';
 
 const api = axios.create({ baseURL: 'https://api.example.com' });
 attachResilience(api, { name: 'api', totalTimeout: '10s' });
@@ -79,10 +79,10 @@ axiosRetry(api, {
 ```
 
 </TabItem>
-<TabItem label="resilience-pipeline">
+<TabItem label="@nodelibraries/resilience">
 
 ```ts
-import { attachResilience } from 'resilience-pipeline/axios';
+import { attachResilience } from '@nodelibraries/resilience/axios';
 
 attachResilience(api, {
   name: 'api',
@@ -112,7 +112,7 @@ await api.get('/report', { 'axios-retry': { retries: 0 } });
 ```
 
 </TabItem>
-<TabItem label="resilience-pipeline">
+<TabItem label="@nodelibraries/resilience">
 
 ```ts
 await api.get('/report', { resilience: { retries: 0, timeout: '2m' } });
@@ -122,7 +122,7 @@ await api.post('/orders', order, { resilience: { idempotent: true } });
 </TabItem>
 </Tabs>
 
-Importing `resilience-pipeline/axios` adds the typed `resilience` field to `AxiosRequestConfig`. Fields: `retries`, `retryOn`, `timeout`, `attemptTimeout`, `idempotent`.
+Importing `@nodelibraries/resilience/axios` adds the typed `resilience` field to `AxiosRequestConfig`. Fields: `retries`, `retryOn`, `timeout`, `attemptTimeout`, `idempotent`.
 
 ### Refreshing a token between attempts
 
@@ -139,11 +139,11 @@ axiosRetry(api, {
 ```
 
 </TabItem>
-<TabItem label="resilience-pipeline">
+<TabItem label="@nodelibraries/resilience">
 
 ```ts
 import { AxiosHeaders } from 'axios';
-import { attachResilience } from 'resilience-pipeline/axios';
+import { attachResilience } from '@nodelibraries/resilience/axios';
 
 attachResilience(api, {
   retryOn: [401, 429, 503],

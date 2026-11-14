@@ -16,7 +16,7 @@ load balancer and you get:
   to 1 000 and gets 429s.
 - **Ten caches, ten locks.** A "run once" job runs once per instance. A cache miss is fetched ten times.
 
-`resilience-pipeline/redis` moves that state to Redis. This guide shows which state to share, how to wire it, and what
+`@nodelibraries/resilience/redis` moves that state to Redis. This guide shows which state to share, how to wire it, and what
 stays local on purpose. The class-by-class reference is on the [Redis integration page](/integrations/redis/).
 
 ## What to share and what to keep local
@@ -48,11 +48,11 @@ export const redis = new Redis(process.env.REDIS_URL!, { commandTimeout: 200, ma
 ## Shared circuit breaker
 
 ```ts twoslash title="payments.ts"
-import type { RedisClient } from 'resilience-pipeline/redis';
+import type { RedisClient } from '@nodelibraries/resilience/redis';
 declare const redis: RedisClient;
 // ---cut---
-import { ResiliencePipelineBuilder, sharedCircuitState } from 'resilience-pipeline';
-import { RedisCircuitStateStore } from 'resilience-pipeline/redis';
+import { ResiliencePipelineBuilder, sharedCircuitState } from '@nodelibraries/resilience';
+import { RedisCircuitStateStore } from '@nodelibraries/resilience/redis';
 
 const circuitStore = new RedisCircuitStateStore({ client: redis });
 
@@ -99,11 +99,11 @@ A quota is per API key. Enforce it in Redis so the fleet as a whole stays under 
 answers from an in-memory limiter instead of failing every call, sized to this instance's share of the quota:
 
 ```ts twoslash title="partner.ts"
-import type { RedisClient } from 'resilience-pipeline/redis';
+import type { RedisClient } from '@nodelibraries/resilience/redis';
 declare const redis: RedisClient;
 // ---cut---
-import { RateLimiterStrategy, ResiliencePipelineBuilder, WindowCounter } from 'resilience-pipeline';
-import { RedisRateLimiter } from 'resilience-pipeline/redis';
+import { RateLimiterStrategy, ResiliencePipelineBuilder, WindowCounter } from '@nodelibraries/resilience';
+import { RedisRateLimiter } from '@nodelibraries/resilience/redis';
 
 const QUOTA = 100; // calls per minute, for the whole fleet
 const INSTANCES = 4;
@@ -135,12 +135,12 @@ For a limit per tenant or user across instances, use `redisPartitionLimiter` wit
 ## Run-once jobs: a lock with fencing
 
 ```ts twoslash title="nightly.ts"
-import type { RedisClient } from 'resilience-pipeline/redis';
+import type { RedisClient } from '@nodelibraries/resilience/redis';
 declare const redis: RedisClient;
 declare function rebuildSearchIndex(fencingToken: number | undefined, signal: AbortSignal): Promise<void>;
 // ---cut---
-import { LockNotAcquiredError, ResiliencePipelineBuilder, getLockToken } from 'resilience-pipeline';
-import { RedisLockStore } from 'resilience-pipeline/redis';
+import { LockNotAcquiredError, ResiliencePipelineBuilder, getLockToken } from '@nodelibraries/resilience';
+import { RedisLockStore } from '@nodelibraries/resilience/redis';
 
 const reindex = new ResiliencePipelineBuilder({ name: 'reindex' })
   .addLock({ key: () => 'reindex', store: new RedisLockStore({ client: redis }), ttl: '30s' })
@@ -162,13 +162,13 @@ that check, not the lease, is what keeps two holders from both writing.
 ## Shared cache
 
 ```ts twoslash
-import type { RedisClient } from 'resilience-pipeline/redis';
+import type { RedisClient } from '@nodelibraries/resilience/redis';
 declare const redis: RedisClient;
 type Rates = Record<string, number>;
 declare function fetchRates(signal: AbortSignal): Promise<Rates>;
 // ---cut---
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
-import { RedisCacheStore } from 'resilience-pipeline/redis';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { RedisCacheStore } from '@nodelibraries/resilience/redis';
 
 const rates = new ResiliencePipelineBuilder<Rates>({ name: 'fx-rates' })
   .addCache({ ttl: '1m', staleTtl: '1h', store: new RedisCacheStore({ client: redis, prefix: 'fx:' }) })

@@ -17,7 +17,7 @@ Use it on every call to a remote dependency: without one, a hung connection hold
 <TabItem label="ResiliencePipelineBuilder">
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const pipeline = new ResiliencePipelineBuilder().addTimeout('2s').build();
 
@@ -29,7 +29,7 @@ const res = await pipeline.execute(({ signal }) => fetch('https://api.example.co
 <TabItem label="PipelineBuilder (smallest bundle)">
 
 ```ts twoslash
-import { PipelineBuilder, timeoutStrategy } from 'resilience-pipeline';
+import { PipelineBuilder, timeoutStrategy } from '@nodelibraries/resilience';
 
 const pipeline = new PipelineBuilder().add(timeoutStrategy('2s')).build();
 
@@ -40,7 +40,7 @@ const res = await pipeline.execute(({ signal }) => fetch('https://api.example.co
 <TabItem label="withTimeout() one-off">
 
 ```ts twoslash
-import { withTimeout } from 'resilience-pipeline';
+import { withTimeout } from '@nodelibraries/resilience';
 
 const res = await withTimeout(({ signal }) => fetch('https://api.example.com/orders', { signal }), '2s');
 ```
@@ -71,7 +71,7 @@ If the **caller** aborts (not the timer), the timeout strategy returns the callb
 ```ts twoslash
 declare function runReport(signal: AbortSignal): Promise<string>;
 // ---cut---
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 // Wait for the report job to stop before failing, and keep its result if it finishes anyway.
 const pipeline = new ResiliencePipelineBuilder<string>()
@@ -86,7 +86,7 @@ const report = await pipeline.execute(({ signal }) => runReport(signal));
 Strategies run in the order they're added; the first is the outermost. The position of the timeout decides what it limits:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 // Each attempt gets 2 s; with 3 retries the call can take 4 × 2 s plus delays.
 const perAttempt = new ResiliencePipelineBuilder().addRetry({ maxRetryAttempts: 3 }).addTimeout('2s').build();
@@ -111,7 +111,7 @@ A pipeline executed inside another one inherits the outer signal, so an outer ti
 `timeoutGenerator` picks the timeout per execution. It receives `{ context }` and may be async. Returning `0`, a negative number or `Infinity` runs that execution **without** a timeout.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const pipeline = new ResiliencePipelineBuilder()
   .addTimeout({
@@ -154,7 +154,7 @@ Check for it with `isTimeoutError(error)`; it works across duplicate copies of t
 The same error object is the abort `reason` of the callback's signal, so code deep inside the call can tell a timeout from a caller cancel:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, isTimeoutError } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder, isTimeoutError } from '@nodelibraries/resilience';
 const pipeline = new ResiliencePipelineBuilder().addTimeout('1s').build();
 // ---cut---
 await pipeline.execute(async ({ signal }) => {

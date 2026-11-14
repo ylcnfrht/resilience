@@ -38,7 +38,7 @@ The fix: when the signal aborts, cancel the backend that runs the query with `pg
 
 ```ts title="db.ts"
 import pg from 'pg';
-import { NonRetryableError } from 'resilience-pipeline';
+import { NonRetryableError } from '@nodelibraries/resilience';
 
 export const pool = new pg.Pool({
   max: 10,
@@ -111,7 +111,7 @@ The isolation level is interpolated into SQL, so it is typed as a fixed union. N
 ## The pipeline: retry the whole transaction
 
 ```ts twoslash title="db-pipeline.ts"
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 /** Errors where running the same transaction again can succeed. */
 const TRANSIENT = new Set([
@@ -185,7 +185,7 @@ Use a breaker for databases that are optional: read replicas (fall back to the p
 a cache. There, opening the circuit and serving the fallback is what you want.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 declare function queryReplica(sql: string, signal: AbortSignal): Promise<unknown[]>;
 declare function queryPrimary(sql: string, signal: AbortSignal): Promise<unknown[]>;
 // ---cut---

@@ -1,5 +1,5 @@
 import { useState } from 'preact/hooks';
-import { createBatcher } from 'resilience-pipeline';
+import { createBatcher } from '@nodelibraries/resilience';
 import Range from './Range.tsx';
 import { fmtMs, seeded } from './sim.ts';
 import { type Kind, type Lane, Timeline, pack, sleepOn, useFakeRun } from './Timeline.tsx';

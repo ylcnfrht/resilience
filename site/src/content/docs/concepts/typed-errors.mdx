@@ -17,7 +17,7 @@ a typed outcome instead of throwing, and `Outcome.match()` makes you handle each
 declare const db: { findUser(id: string, signal: AbortSignal): Promise<{ id: string; name: string } | null> };
 declare function cachedUser(id: string): { id: string; name: string } | null;
 // ---cut---
-import { ResiliencePipelineBuilder, Outcome } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder, Outcome } from '@nodelibraries/resilience';
 
 class NotFound extends Error {
   readonly code = 'NOT_FOUND' as const;
@@ -64,7 +64,7 @@ A strategy can take errors *out* of the type. Only errors of strategies added **
 those are the ones it wraps.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, Outcome } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder, Outcome } from '@nodelibraries/resilience';
 class PaymentUnavailable extends Error {
   readonly code = 'PAYMENT_UNAVAILABLE' as const;
 }
@@ -107,7 +107,7 @@ Outcome.match(outcome, { ok, PAYMENT_UNAVAILABLE: (e) => e.cause, UNEXPECTED: (e
 ## Narrowing outside `match`
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, type PipelineErrors } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder, type PipelineErrors } from '@nodelibraries/resilience';
 // ---cut---
 const pipeline = new ResiliencePipelineBuilder().addTimeout('2s').addConcurrencyLimiter(10).build();
 
@@ -140,7 +140,7 @@ try {
 | `Outcome.from(v)` | Convert a foreign `Result` through a registered adapter |
 
 ```ts twoslash
-import { Outcome } from 'resilience-pipeline';
+import { Outcome } from '@nodelibraries/resilience';
 declare const text: string;
 // ---cut---
 class ConfigError extends Error {
@@ -160,7 +160,7 @@ const port = config.ok ? config.result.port : 8080;
 ts-results, Effect's `Either`…). A returned `Err` then joins the typed channel like `Outcome.fromError`:
 
 ```ts twoslash
-import { Outcome, registerResultAdapter } from 'resilience-pipeline';
+import { Outcome, registerResultAdapter } from '@nodelibraries/resilience';
 declare class Ok<T> { readonly value: T; isOk(): true }
 declare class Err<E> { readonly error: E; isOk(): false }
 // ---cut---
@@ -170,7 +170,7 @@ registerResultAdapter('neverthrow', {
 });
 ```
 
-`resilience-pipeline/outcome` exports the outcome helpers and error classes without any strategy, for code that
+`@nodelibraries/resilience/outcome` exports the outcome helpers and error classes without any strategy, for code that
 only consumes results.
 
 ## Error classes and codes

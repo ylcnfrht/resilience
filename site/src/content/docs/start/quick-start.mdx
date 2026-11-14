@@ -16,7 +16,7 @@ No pipeline needed for a single retry loop:
 ```ts twoslash
 declare function getUser(id: string): Promise<{ id: string; name: string }>;
 // ---cut---
-import { retry, withTimeout, NonRetryableError } from 'resilience-pipeline';
+import { retry, withTimeout, NonRetryableError } from '@nodelibraries/resilience';
 
 const user = await retry(() => getUser('42'), {
   maxRetryAttempts: 5,
@@ -38,7 +38,7 @@ When several strategies must cooperate, build a pipeline once and reuse it. Reus
 state lives in the pipeline.
 
 ```ts twoslash title="orders-client.ts"
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 class HttpError extends Error {
   constructor(readonly status: number) {
@@ -80,7 +80,7 @@ What this does:
 declare function findUser(id: string, signal: AbortSignal): Promise<{ id: string } | undefined>;
 declare const cached: { id: string };
 // ---cut---
-import { ResiliencePipelineBuilder, Outcome } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder, Outcome } from '@nodelibraries/resilience';
 
 class NotFound extends Error {
   readonly code = 'NOT_FOUND' as const;
@@ -116,8 +116,8 @@ Every strategy reads time from a `TimeProvider`. Swap in `FakeTimeProvider` and 
 
 ```ts twoslash title="retry.test.ts"
 import assert from 'node:assert/strict';
-import { ResiliencePipelineBuilder, TimeoutRejectedError } from 'resilience-pipeline';
-import { FakeTimeProvider } from 'resilience-pipeline/testing';
+import { ResiliencePipelineBuilder, TimeoutRejectedError } from '@nodelibraries/resilience';
+import { FakeTimeProvider } from '@nodelibraries/resilience/testing';
 
 const time = new FakeTimeProvider();
 const pipeline = new ResiliencePipelineBuilder({ timeProvider: time })

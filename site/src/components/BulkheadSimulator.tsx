@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'preact/hooks';
-import { BulkheadRejectedError, PipelineBuilder, concurrencyLimiterStrategy } from 'resilience-pipeline';
+import { BulkheadRejectedError, PipelineBuilder, concurrencyLimiterStrategy } from '@nodelibraries/resilience';
 import Range from './Range.tsx';
 import { fmtMs, seeded, sleep } from './sim.ts';
 import './demo.css';

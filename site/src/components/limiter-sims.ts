@@ -1,6 +1,6 @@
 // Deterministic simulations behind RateLimiterTimeline and AdaptiveLimitChart. The admission / limit decisions come from the
 // library's own objects (passed in), so these files only model time and the dependency.
-import type { LimitAlgorithm, RateLimiterAlgorithm } from 'resilience-pipeline';
+import type { LimitAlgorithm, RateLimiterAlgorithm } from '@nodelibraries/resilience';
 import { seeded } from './sim.ts';
 
 export interface Mark {

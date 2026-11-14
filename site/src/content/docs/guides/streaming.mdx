@@ -20,7 +20,7 @@ then on the stream is **committed** to the caller.
 ## The basic call
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 declare function openCompletion(prompt: string, options: { signal: AbortSignal }): Promise<AsyncIterable<string>>;
 declare function render(token: string): void;
 // ---cut---
@@ -67,10 +67,10 @@ The pipeline timeout only bounds the wait for the first chunk. For a limit on th
 use the source's own signal:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 declare function openCompletion(prompt: string, options: { signal: AbortSignal }): Promise<AsyncIterable<string>>;
 declare function render(token: string): void;
-declare const llm: import('resilience-pipeline').ResiliencePipeline;
+declare const llm: import('@nodelibraries/resilience').ResiliencePipeline;
 // ---cut---
 const total = AbortSignal.timeout(60_000); // the whole answer, including retries before the first token
 
@@ -100,8 +100,8 @@ returns, which for a stream is right after the first chunk. Aborting the `signal
 ```ts twoslash
 declare function openPrimary(prompt: string, signal: AbortSignal): Promise<AsyncIterable<string>>;
 declare function openBackup(prompt: string, signal: AbortSignal): Promise<AsyncIterable<string>>;
-declare const llm: import('resilience-pipeline').ResiliencePipeline;
-declare const backup: import('resilience-pipeline').ResiliencePipeline;
+declare const llm: import('@nodelibraries/resilience').ResiliencePipeline;
+declare const backup: import('@nodelibraries/resilience').ResiliencePipeline;
 // ---cut---
 async function* answer(prompt: string): AsyncGenerator<string> {
   let yielded = false;
@@ -125,8 +125,8 @@ async function* answer(prompt: string): AsyncGenerator<string> {
 directly. Check the status inside the factory, so a 503 counts as a failure before the first chunk and is retried:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
-declare const llm: import('resilience-pipeline').ResiliencePipeline;
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+declare const llm: import('@nodelibraries/resilience').ResiliencePipeline;
 declare function write(bytes: Uint8Array): void;
 // ---cut---
 const download = llm.executeStream(async ({ signal }) => {

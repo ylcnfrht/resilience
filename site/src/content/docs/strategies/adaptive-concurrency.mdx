@@ -13,7 +13,7 @@ A fixed [concurrency limit](/strategies/concurrency-limiter/) needs a number, an
 <Tabs syncKey="builder">
 <TabItem label="ResiliencePipelineBuilder">
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const pipeline = new ResiliencePipelineBuilder()
   .addAdaptiveConcurrencyLimiter({ minLimit: 5, maxLimit: 200 })
@@ -25,7 +25,7 @@ await pipeline.execute(({ signal }) => fetch('https://search.internal/q?term=res
 </TabItem>
 <TabItem label="PipelineBuilder">
 ```ts twoslash
-import { PipelineBuilder, adaptiveConcurrencyLimiterStrategy, timeoutStrategy } from 'resilience-pipeline';
+import { PipelineBuilder, adaptiveConcurrencyLimiterStrategy, timeoutStrategy } from '@nodelibraries/resilience';
 
 const pipeline = new PipelineBuilder()
   .add(adaptiveConcurrencyLimiterStrategy({ minLimit: 5, maxLimit: 200 }))
@@ -64,7 +64,7 @@ The limit is fractional internally; `limit` reports whole permits.
 Pass a name for the defaults, or call the factory to tune it:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, vegas } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder, vegas } from '@nodelibraries/resilience';
 
 const pipeline = new ResiliencePipelineBuilder()
   .addAdaptiveConcurrencyLimiter({ algorithm: vegas({ alpha: 2, beta: 4 }), initialLimit: 10 })
@@ -111,7 +111,7 @@ Additive increase, multiplicative decrease (TCP Reno): `+increase / limit` per s
 Any object with `onSample(sample) => number` works. The sample is `{ rtt, inflight, dropped, limit }`; return the next limit (the strategy clamps it, and ignores non-finite values).
 
 ```ts twoslash
-import { type LimitAlgorithm, ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { type LimitAlgorithm, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 // Halve on overload, otherwise creep up by one per call.
 const halving: LimitAlgorithm = {
@@ -142,7 +142,7 @@ const pipeline = new ResiliencePipelineBuilder().addAdaptiveConcurrencyLimiter({
 `AdaptiveLimitProvider` reads the live state of one limiter, e.g. for a health endpoint or a gauge. A provider attaches to a single limiter; attaching it twice throws. The strategy instance (`pipeline.getStrategy('AdaptiveConcurrencyLimiter')`) has the same `limit`, `inflight` and `queued` getters.
 
 ```ts twoslash
-import { AdaptiveLimitProvider, ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { AdaptiveLimitProvider, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const provider = new AdaptiveLimitProvider();
 const pipeline = new ResiliencePipelineBuilder()

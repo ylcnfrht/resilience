@@ -1,31 +1,31 @@
 <div align="center">
 
-# resilience-pipeline
+# @nodelibraries/resilience
 
 **Failures are inevitable. Outages are optional.**
 
 Retry, circuit breaker, timeout, hedging, rate limiting and typed errors for TypeScript,<br>
 composed into one pipeline. A [Polly v8](https://www.pollydocs.org/) API for Node, Bun, Deno, Workers and browsers.
 
-[![npm](https://img.shields.io/npm/v/resilience-pipeline?color=5eead4&label=npm)](https://www.npmjs.com/package/resilience-pipeline)
-[![CI](https://github.com/ylcnfrht/resilience-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/ylcnfrht/resilience-pipeline/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@nodelibraries/resilience?color=5eead4&label=npm)](https://www.npmjs.com/package/@nodelibraries/resilience)
+[![CI](https://github.com/nodelibraries/resilience/actions/workflows/ci.yml/badge.svg)](https://github.com/nodelibraries/resilience/actions/workflows/ci.yml)
 [![zero dependencies](https://img.shields.io/badge/dependencies-0-5eead4)](package.json)
-[![types](https://img.shields.io/npm/types/resilience-pipeline?color=5eead4)](https://www.npmjs.com/package/resilience-pipeline)
-[![license](https://img.shields.io/npm/l/resilience-pipeline?color=5eead4)](LICENSE)
+[![types](https://img.shields.io/npm/types/@nodelibraries/resilience?color=5eead4)](https://www.npmjs.com/package/@nodelibraries/resilience)
+[![license](https://img.shields.io/npm/l/@nodelibraries/resilience?color=5eead4)](LICENSE)
 [![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-ffdd00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/ylcnfrht)
 
-[**Documentation**](https://resilience-pipeline.ferhatyalcin.dev) · [Quick start](https://resilience-pipeline.ferhatyalcin.dev/start/quick-start/) · [Playground](https://resilience-pipeline.ferhatyalcin.dev/playground/)
+[**Documentation**](https://resilience.ferhatyalcin.dev) · [Quick start](https://resilience.ferhatyalcin.dev/start/quick-start/) · [Playground](https://resilience.ferhatyalcin.dev/playground/)
 
 </div>
 
 ---
 
 ```sh
-npm i resilience-pipeline
+npm i @nodelibraries/resilience
 ```
 
 ```ts
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const payments = new ResiliencePipelineBuilder({ name: 'payments' })
   .addFallback({ fallbackAction: () => queueForLater() })
@@ -39,7 +39,7 @@ const receipt = await payments.execute(({ signal }) => charge(order, { signal })
 
 Strategies run in the order you add them, the first one outermost: here every retry attempt gets its own 2 s timeout and passes the circuit breaker, and if everything fails the fallback answers. Pass `signal` to your I/O: timeouts, hedging and caller cancellation all work by aborting it.
 
-## Why resilience-pipeline
+## Why @nodelibraries/resilience
 
 - **One composable pipeline.** Retry, circuit breaker, timeout, fallback, hedging, bulkhead, rate limiting, cache, lock and chaos, in any order, through one builder. If you know Polly, you already know the API.
 - **Strategies the other Node libraries don't ship.** Hedging, adaptive concurrency limits (gradient2, vegas, aimd), retry budgets, fixed/sliding/per-key rate limits and Redis-shared state.
@@ -54,7 +54,7 @@ Strategies run in the order you add them, the first one outermost: here every re
 **One-liners**, when you don't need a pipeline:
 
 ```ts
-import { NonRetryableError, retry, withTimeout } from 'resilience-pipeline';
+import { NonRetryableError, retry, withTimeout } from '@nodelibraries/resilience';
 
 const user = await retry(() => api.getUser(id), { maxRetryAttempts: 5, backoffType: 'exponential', useJitter: 'full' });
 const page = await withTimeout(({ signal }) => fetch(url, { signal }), '2s');
@@ -64,7 +64,7 @@ const page = await withTimeout(({ signal }) => fetch(url, { signal }), '2s');
 **HTTP clients**: per-host breakers, retries that honour `Retry-After`, idempotency-aware POSTs.
 
 ```ts
-import { createResilientFetch } from 'resilience-pipeline/fetch';
+import { createResilientFetch } from '@nodelibraries/resilience/fetch';
 
 const http = createResilientFetch({ name: 'github', retryOn: [429, 503] });
 const res = await http('https://api.github.com/repos/nodejs/node', { resilience: { timeout: '3s' } });
@@ -73,7 +73,7 @@ const res = await http('https://api.github.com/repos/nodejs/node', { resilience:
 **Typed errors**: the compiler knows every way a call can fail.
 
 ```ts
-import { Outcome, ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { Outcome, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const pipeline = new ResiliencePipelineBuilder().addTimeout('2s').addCircuitBreaker().build();
 
@@ -89,7 +89,7 @@ const user = Outcome.match(await pipeline.settle(() => db.findUser(id)), {
 **Inbound protection** for Express, Fastify, Koa and Hono: a request budget that propagates, load shedding and rate limits.
 
 ```ts
-import { resilienceMiddleware } from 'resilience-pipeline/http';
+import { resilienceMiddleware } from '@nodelibraries/resilience/http';
 
 app.use(resilienceMiddleware({
   timeout: '5s',
@@ -107,7 +107,7 @@ for await (const token of pipeline.executeStream(({ signal }) => llm.stream(prom
 **Tests without waiting**:
 
 ```ts
-import { FakeTimeProvider } from 'resilience-pipeline/testing';
+import { FakeTimeProvider } from '@nodelibraries/resilience/testing';
 
 const time = new FakeTimeProvider();
 const pipeline = new ResiliencePipelineBuilder({ timeProvider: time })
@@ -136,7 +136,7 @@ await done;
 | Lock | `addLock` | Distributed lock with lease renewal and fencing tokens |
 | Chaos | `addChaosFault`, `addChaosLatency`, `addChaosOutcome`, `addChaosBehavior` | Inject failures and latency for game days |
 
-Every strategy is tree-shakeable: `PipelineBuilder` with `retryStrategy()`, `timeoutStrategy()`, … bundles only what you add. See [Strategies](https://resilience-pipeline.ferhatyalcin.dev/strategies/retry/).
+Every strategy is tree-shakeable: `PipelineBuilder` with `retryStrategy()`, `timeoutStrategy()`, … bundles only what you add. See [Strategies](https://resilience.ferhatyalcin.dev/strategies/retry/).
 
 ## Integrations
 
@@ -144,16 +144,16 @@ Each is a subpath of the same package, with optional peer dependencies.
 
 | Import | For |
 |---|---|
-| `resilience-pipeline/fetch` | `createResilientFetch`: per-host pipelines for `fetch` |
-| `resilience-pipeline/axios` | `attachResilience(axios)` |
-| `resilience-pipeline/http` | Express / Connect and Hono middleware, `describeResilienceError` |
-| `resilience-pipeline/fastify`, `/koa` | Fastify plugin, Koa middleware |
-| `resilience-pipeline/nestjs` | `@Retry`, `@CircuitBreaker`, `@Timeout`, `@UsePipeline` … for providers and controllers |
-| `resilience-pipeline/redis` | Shared circuit state, rate limits, locks and cache across instances (ioredis, node-redis, Cluster) |
-| `resilience-pipeline/otel`, `/prometheus` | OpenTelemetry spans and metrics, Prometheus metrics |
-| `resilience-pipeline/adapters` | rate-limiter-flexible as a rate limiter backend |
-| `resilience-pipeline/hystrix` | A Hystrix-dashboard event stream |
-| `resilience-pipeline/testing` | `FakeTimeProvider` |
+| `@nodelibraries/resilience/fetch` | `createResilientFetch`: per-host pipelines for `fetch` |
+| `@nodelibraries/resilience/axios` | `attachResilience(axios)` |
+| `@nodelibraries/resilience/http` | Express / Connect and Hono middleware, `describeResilienceError` |
+| `@nodelibraries/resilience/fastify`, `/koa` | Fastify plugin, Koa middleware |
+| `@nodelibraries/resilience/nestjs` | `@Retry`, `@CircuitBreaker`, `@Timeout`, `@UsePipeline` … for providers and controllers |
+| `@nodelibraries/resilience/redis` | Shared circuit state, rate limits, locks and cache across instances (ioredis, node-redis, Cluster) |
+| `@nodelibraries/resilience/otel`, `/prometheus` | OpenTelemetry spans and metrics, Prometheus metrics |
+| `@nodelibraries/resilience/adapters` | rate-limiter-flexible as a rate limiter backend |
+| `@nodelibraries/resilience/hystrix` | A Hystrix-dashboard event stream |
+| `@nodelibraries/resilience/testing` | `FakeTimeProvider` |
 
 ## Runtimes
 
@@ -163,9 +163,9 @@ Each is a subpath of the same package, with optional peer dependencies.
 | Bun | Supported, tested |
 | Deno 2 | Supported, tested (deadline propagation and `diagnostics_channel` on Deno ≥ 2.1) |
 | Cloudflare Workers | Supported, tested (enable `nodejs_compat` for deadline propagation) |
-| Browsers (ES2022) | Supported; also as a script tag: `unpkg.com/resilience-pipeline`, global `resiliencePipeline` |
+| Browsers (ES2022) | Supported; also as a script tag: `unpkg.com/@nodelibraries/resilience`, global `resilience` |
 
-Details in [Runtimes](https://resilience-pipeline.ferhatyalcin.dev/concepts/runtimes/).
+Details in [Runtimes](https://resilience.ferhatyalcin.dev/concepts/runtimes/).
 
 ## Bundle size
 
@@ -179,11 +179,11 @@ Details in [Runtimes](https://resilience-pipeline.ferhatyalcin.dev/concepts/runt
 
 ## Migrating
 
-Coming from another library? Step-by-step guides for [cockatiel](https://resilience-pipeline.ferhatyalcin.dev/migration/cockatiel/), [opossum](https://resilience-pipeline.ferhatyalcin.dev/migration/opossum/), [p-retry](https://resilience-pipeline.ferhatyalcin.dev/migration/p-retry/), [axios-retry](https://resilience-pipeline.ferhatyalcin.dev/migration/axios-retry/), [tenace](https://resilience-pipeline.ferhatyalcin.dev/migration/tenace/), [@nestjs/resilience](https://resilience-pipeline.ferhatyalcin.dev/migration/nestjs-resilience/), [Polly](https://resilience-pipeline.ferhatyalcin.dev/migration/polly/).
+Coming from another library? Step-by-step guides for [cockatiel](https://resilience.ferhatyalcin.dev/migration/cockatiel/), [opossum](https://resilience.ferhatyalcin.dev/migration/opossum/), [p-retry](https://resilience.ferhatyalcin.dev/migration/p-retry/), [axios-retry](https://resilience.ferhatyalcin.dev/migration/axios-retry/), [tenace](https://resilience.ferhatyalcin.dev/migration/tenace/), [@nestjs/resilience](https://resilience.ferhatyalcin.dev/migration/nestjs-resilience/), [Polly](https://resilience.ferhatyalcin.dev/migration/polly/).
 
 ## Documentation
 
-Everything else (concepts, every strategy option, integrations, guides for databases, serverless, streaming, multi-instance setups and game days, telemetry events and error codes) is on **[resilience-pipeline.ferhatyalcin.dev](https://resilience-pipeline.ferhatyalcin.dev)**, with interactive explainers that run the library in your browser. An index for coding agents is at [`/llms.txt`](https://resilience-pipeline.ferhatyalcin.dev/llms.txt).
+Everything else (concepts, every strategy option, integrations, guides for databases, serverless, streaming, multi-instance setups and game days, telemetry events and error codes) is on **[resilience.ferhatyalcin.dev](https://resilience.ferhatyalcin.dev)**, with interactive explainers that run the library in your browser. An index for coding agents is at [`/llms.txt`](https://resilience.ferhatyalcin.dev/llms.txt).
 
 ## Contributing
 
@@ -196,11 +196,11 @@ npm run check:size    # bundle-size budgets
 
 `REDIS_CLUSTER=host:port,…` also runs the Redis Cluster test. The docs site lives in [`site/`](site/) (`npm run dev` there); every code sample in it is type-checked at build time.
 
-resilience-pipeline is an independent TypeScript implementation inspired by Polly. It is not affiliated with the Polly project or the .NET Foundation.
+@nodelibraries/resilience is an independent TypeScript implementation inspired by Polly. It is not affiliated with the Polly project or the .NET Foundation.
 
 ## Support
 
-If resilience-pipeline saves you an outage, you can [buy me a coffee](https://buymeacoffee.com/ylcnfrht) ☕. Issues, ideas and pull requests are just as welcome.
+If @nodelibraries/resilience saves you an outage, you can [buy me a coffee](https://buymeacoffee.com/ylcnfrht) ☕. Issues, ideas and pull requests are just as welcome.
 
 ## License
 

@@ -29,7 +29,7 @@ export default defineEcConfig({
   },
   plugins: [
     ecTwoSlash({
-      // Snippets import 'resilience-pipeline' and its subpaths; resolve them to the library's source.
+      // Snippets import '@nodelibraries/resilience' and its subpaths; resolve them to the library's source.
       twoslashOptions: {
       // expressive-code-twoslash 0.6.1 builds a fresh twoslasher per block; a shared env cache stops the build OOM.
       cache: new Map(),
@@ -41,7 +41,7 @@ export default defineEcConfig({
           allowImportingTsExtensions: true,
           noEmit: true,
           skipLibCheck: true,
-          paths: { 'resilience-pipeline': [`${lib}index.ts`], 'resilience-pipeline/*': [`${lib}*.ts`] },
+          paths: { '@nodelibraries/resilience': [`${lib}index.ts`], '@nodelibraries/resilience/*': [`${lib}*.ts`] },
         },
       },
     }),

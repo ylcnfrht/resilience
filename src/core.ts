@@ -20,7 +20,7 @@ export type MaybePromise<X> = X | Promise<X>;
  */
 export type Outcome<T, E = unknown> = { readonly ok: true; readonly result: T } | { readonly ok: false; readonly error: E };
 
-const OUTCOME_BRAND = /* @__PURE__ */ Symbol.for('resilience-pipeline.outcome');
+const OUTCOME_BRAND = /* @__PURE__ */ Symbol.for('@nodelibraries/resilience.outcome');
 
 /** The `code`s of an error union: `ErrorCodes<TimeoutRejectedError | NotFound>` → `'TIMEOUT' | 'NOT_FOUND'`. */
 export type ErrorCodes<E> = E extends { readonly code: infer C } ? (C extends string ? C : never) : never;
@@ -292,9 +292,9 @@ export function isClientError(error: unknown): boolean {
 
 // Brands are registered symbols, so they match across duplicate copies of this package (ESM + CJS, nested installs),
 // where `instanceof` silently fails.
-const ERROR_BRAND = /* @__PURE__ */ Symbol.for('resilience-pipeline.error');
-const REJECTION_BRAND = /* @__PURE__ */ Symbol.for('resilience-pipeline.rejection');
-const NON_RETRYABLE_BRAND = /* @__PURE__ */ Symbol.for('resilience-pipeline.non-retryable');
+const ERROR_BRAND = /* @__PURE__ */ Symbol.for('@nodelibraries/resilience.error');
+const REJECTION_BRAND = /* @__PURE__ */ Symbol.for('@nodelibraries/resilience.rejection');
+const NON_RETRYABLE_BRAND = /* @__PURE__ */ Symbol.for('@nodelibraries/resilience.non-retryable');
 const branded = (value: unknown, brand: symbol): boolean => typeof value === 'object' && value !== null && (value as Record<symbol, unknown>)[brand] === true;
 
 /** Any error raised by a strategy (timeout, open circuit, limiter, lock…). Works across duplicate package copies. */
@@ -524,7 +524,7 @@ export class BulkheadRejectedError extends RateLimiterRejectedError {
   }
 }
 
-export const TELEMETRY_CHANNEL = 'resilience-pipeline';
+export const TELEMETRY_CHANNEL = '@nodelibraries/resilience';
 const channel = nodeBuiltin<{ channel(name: string): { readonly hasSubscribers: boolean; publish(message: unknown): void } }>('node:diagnostics_channel')?.channel(TELEMETRY_CHANNEL);
 
 export interface TelemetrySource {
@@ -541,7 +541,7 @@ export interface StrategySource extends TelemetrySource {
   readonly timeProvider: TimeProvider;
 }
 
-/** Published on the `resilience-pipeline` diagnostics channel and to `onTelemetry` listeners. */
+/** Published on the `@nodelibraries/resilience` diagnostics channel and to `onTelemetry` listeners. */
 export interface TelemetryEvent {
   readonly event: string;
   readonly source: TelemetrySource;
@@ -591,7 +591,7 @@ export function report(source: TelemetrySource, event: string, context: Resilien
   channel?.publish(message);
 }
 
-/** Clock and timers used by every strategy. Swap it for `FakeTimeProvider` (`resilience-pipeline/testing`) to test without waiting. */
+/** Clock and timers used by every strategy. Swap it for `FakeTimeProvider` (`@nodelibraries/resilience/testing`) to test without waiting. */
 export interface TimeProvider {
   /** Epoch milliseconds. */
   now(): number;
@@ -622,7 +622,7 @@ export interface ExecutionInfo {
 }
 
 /**
- * Wraps executions and attempts, e.g. to open a tracing span around them (`resilience-pipeline/otel` uses this).
+ * Wraps executions and attempts, e.g. to open a tracing span around them (`@nodelibraries/resilience/otel` uses this).
  * Each hook must call `run()` exactly once and return what it returns.
  */
 export interface Instrumentation {

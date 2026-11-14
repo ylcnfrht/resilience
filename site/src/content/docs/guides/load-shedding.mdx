@@ -29,7 +29,7 @@ Each framework integration builds the same inbound pipeline: rate limit (optiona
 <TabItem label="Express">
 ```ts
 import express from 'express';
-import { resilienceMiddleware } from 'resilience-pipeline/http';
+import { resilienceMiddleware } from '@nodelibraries/resilience/http';
 
 const app = express();
 app.get('/healthz', (_req, res) => res.send('ok')); // before the middleware: never shed
@@ -44,7 +44,7 @@ app.use(
 <TabItem label="Hono">
 ```ts
 import { Hono } from 'hono';
-import { honoResilience } from 'resilience-pipeline/http';
+import { honoResilience } from '@nodelibraries/resilience/http';
 
 const app = new Hono();
 app.use('/api/*', honoResilience({ timeout: '5s', concurrency: { permitLimit: 200, queueLimit: 100, queueTimeout: '500ms' } }));
@@ -53,7 +53,7 @@ app.use('/api/*', honoResilience({ timeout: '5s', concurrency: { permitLimit: 20
 <TabItem label="Fastify">
 ```ts
 import Fastify from 'fastify';
-import { fastifyResilience } from 'resilience-pipeline/fastify';
+import { fastifyResilience } from '@nodelibraries/resilience/fastify';
 
 const app = Fastify();
 // Register and await before the routes, so its onRoute hook sees them.
@@ -63,7 +63,7 @@ await app.register(fastifyResilience, { timeout: '5s', concurrency: { permitLimi
 <TabItem label="Koa">
 ```ts
 import Koa from 'koa';
-import { koaResilience } from 'resilience-pipeline/koa';
+import { koaResilience } from '@nodelibraries/resilience/koa';
 
 const app = new Koa();
 app.use(koaResilience({ timeout: '5s', concurrency: { permitLimit: 200, queueLimit: 100, queueTimeout: '500ms' } }));
@@ -103,7 +103,7 @@ and inherits its signal, so when the 5 s are up, the database query, the HTTP ca
 aborted, without passing a signal through every function:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, getResilienceSignal } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder, getResilienceSignal } from '@nodelibraries/resilience';
 declare function queryInventory(sku: string, signal: AbortSignal): Promise<number>;
 // ---cut---
 const inventory = new ResiliencePipelineBuilder<number>({ name: 'inventory' })
@@ -135,8 +135,8 @@ The built-in `concurrency` option treats every request the same. For priorities,
 pass it as `pipeline`. The request is in `context.properties` under `HTTP_REQUEST`:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, type ResilienceContext } from 'resilience-pipeline';
-import { HTTP_REQUEST } from 'resilience-pipeline/http';
+import { ResiliencePipelineBuilder, type ResilienceContext } from '@nodelibraries/resilience';
+import { HTTP_REQUEST } from '@nodelibraries/resilience/http';
 
 type Req = { method: string; path: string; headers: Record<string, string | undefined> };
 const req = (ctx: ResilienceContext) => ctx.properties.get(HTTP_REQUEST) as Req;
@@ -185,7 +185,7 @@ A fixed `permitLimit` is right for one deployment, one instance size and one tra
 stays flat and lowers it as soon as latency climbs or requests time out.
 
 ```ts twoslash
-import { AdaptiveLimitProvider, ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { AdaptiveLimitProvider, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 // ---cut---
 export const limit = new AdaptiveLimitProvider();
 
@@ -222,7 +222,7 @@ The same tools protect you from a slow dependency eating every slot. Give each d
 database that slows down can hold at most its share of the requests in flight, and the routes that don't need it keep working:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 // ---cut---
 const recommendations = new ResiliencePipelineBuilder<string[]>({ name: 'recommendations' })
   .addFallback({ fallbackAction: () => [] }) // shed = empty list, the page still renders

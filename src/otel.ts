@@ -2,9 +2,9 @@ import { type Attributes, type Meter, type ObservableResult, type Span, SpanStat
 import { type ExecutionInfo, type Outcome, type TelemetryEvent, instrument, onTelemetry } from './core.ts';
 
 export interface OpenTelemetryOptions {
-  /** Default: `metrics.getMeter('resilience-pipeline')` from the global MeterProvider. */
+  /** Default: `metrics.getMeter('@nodelibraries/resilience')` from the global MeterProvider. */
   meter?: Meter;
-  /** Default: `trace.getTracer('resilience-pipeline')` from the global TracerProvider. */
+  /** Default: `trace.getTracer('@nodelibraries/resilience')` from the global TracerProvider. */
   tracer?: Tracer;
   /** Record metrics. Default true. */
   metrics?: boolean;
@@ -54,7 +54,7 @@ export function instrumentOpenTelemetry(options: OpenTelemetryOptions = {}): () 
   const stops: Array<() => void> = [];
 
   if (options.traces ?? true) {
-    const tracer = options.tracer ?? trace.getTracer('resilience-pipeline');
+    const tracer = options.tracer ?? trace.getTracer('@nodelibraries/resilience');
     const failed = (span: Span, error: unknown) => {
       span.setAttribute('error.type', errorType(error));
       if (error instanceof Error) span.recordException(error);
@@ -96,7 +96,7 @@ export function instrumentOpenTelemetry(options: OpenTelemetryOptions = {}): () 
   }
 
   const record = options.metrics ?? true;
-  const meter = options.meter ?? metrics.getMeter('resilience-pipeline');
+  const meter = options.meter ?? metrics.getMeter('@nodelibraries/resilience');
   const events = meter.createCounter('resilience.strategy.events', { description: 'Resilience strategy events (retry, timeout, circuit state changes, rejections).' });
   const duration = meter.createHistogram('resilience.pipeline.duration', { unit: 's', description: 'Duration of resilience pipeline executions, retries included.', advice });
   const attemptDuration = meter.createHistogram('resilience.attempt.duration', { unit: 's', description: 'Duration of each attempt made by a retry strategy.', advice });

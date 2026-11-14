@@ -16,7 +16,7 @@ They are plain functions, not pipeline strategies. To merge many *calls* into on
 Runs tasks in parallel. On the first failure, the others are aborted through their context signal, and `all` rejects with that failure. The result is a typed tuple.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, all } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder, all } from '@nodelibraries/resilience';
 interface User { id: string }
 interface Order { total: number }
 declare function getUser(id: string, signal: AbortSignal): Promise<User>;
@@ -35,7 +35,7 @@ const [user, orders] = await all(
 Runs every task to the end and returns one `Outcome` per task, in order. It never rejects, except when the caller's `signal` aborts (it then rejects with the abort reason once the tasks have settled).
 
 ```ts twoslash
-import { allSettled } from 'resilience-pipeline';
+import { allSettled } from '@nodelibraries/resilience';
 declare function ping(host: string, signal: AbortSignal): Promise<number>;
 // ---cut---
 const outcomes = await allSettled([({ signal }) => ping('eu', signal), ({ signal }) => ping('us', signal)]);
@@ -47,7 +47,7 @@ for (const o of outcomes) console.log(o.ok ? `${o.result} ms` : `down: ${String(
 Maps items with at most `concurrency` running at once. Results come back in input order.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, map } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder, map } from '@nodelibraries/resilience';
 declare function resize(url: string, signal: AbortSignal): Promise<string>;
 declare const urls: string[];
 // ---cut---
@@ -90,7 +90,7 @@ Sharing one pipeline across the items also shares its state: one circuit breaker
 Polls `condition` until it returns `true`. Rejects with `TimeoutRejectedError` after `timeout`, or with the error if `condition` throws.
 
 ```ts twoslash
-import { waitFor } from 'resilience-pipeline';
+import { waitFor } from '@nodelibraries/resilience';
 declare const jobId: string;
 // ---cut---
 // Fixed interval.

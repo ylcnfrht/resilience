@@ -15,6 +15,6 @@ export const GET: APIRoute = async ({ site }) => {
       return `## ${s[0].toUpperCase()}${s.slice(1)}\n\n${items.join('\n')}`;
     })
     .join('\n\n');
-  const head = `# resilience-pipeline\n\n> Resilience pipelines for TypeScript: retry, circuit breaker, timeout, hedging, rate limiting and typed errors, for Node, Bun, Deno, Workers and browsers. Zero dependencies.\n\nAPI reference: ${new URL('/api/overview/', site)}\n\n`;
+  const head = `# @nodelibraries/resilience\n\n> Resilience pipelines for TypeScript: retry, circuit breaker, timeout, hedging, rate limiting and typed errors, for Node, Bun, Deno, Workers and browsers. Zero dependencies.\n\nAPI reference: ${new URL('/api/overview/', site)}\n\n`;
   return new Response(head + body + '\n', { headers: { 'content-type': 'text/plain; charset=utf-8' } });
 };

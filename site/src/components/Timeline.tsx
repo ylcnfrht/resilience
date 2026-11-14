@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
-import { FakeTimeProvider } from 'resilience-pipeline/testing';
-import type { TimeProvider } from 'resilience-pipeline';
+import { FakeTimeProvider } from '@nodelibraries/resilience/testing';
+import type { TimeProvider } from '@nodelibraries/resilience';
 import './demo.css';
 import './Timeline.css';
 

@@ -53,7 +53,7 @@ interface ExecutionContext {
 }
 declare function chargeCard(body: unknown, signal: AbortSignal): Promise<Response>;
 // ---cut---
-import { CircuitBreakerStateProvider, ResiliencePipelineBuilder, type CircuitSnapshot } from 'resilience-pipeline';
+import { CircuitBreakerStateProvider, ResiliencePipelineBuilder, type CircuitSnapshot } from '@nodelibraries/resilience';
 
 interface Env {
   BREAKERS: KVNamespace;
@@ -110,12 +110,12 @@ local state change, and pulls again every `syncInterval` while the instance runs
 opens the circuit for all of them.
 
 ```ts twoslash
-import type { RedisClient } from 'resilience-pipeline/redis';
+import type { RedisClient } from '@nodelibraries/resilience/redis';
 declare const redis: RedisClient; // an ioredis client, created at module scope
 declare function chargeCard(order: unknown, signal: AbortSignal): Promise<Response>;
 // ---cut---
-import { ResiliencePipelineBuilder, sharedCircuitState } from 'resilience-pipeline';
-import { RedisCircuitStateStore } from 'resilience-pipeline/redis';
+import { ResiliencePipelineBuilder, sharedCircuitState } from '@nodelibraries/resilience';
+import { RedisCircuitStateStore } from '@nodelibraries/resilience/redis';
 
 // Module scope: built once per instance, reused by warm invocations.
 const payments = new ResiliencePipelineBuilder<Response>({ name: 'payments' })
@@ -154,7 +154,7 @@ What to save, and when:
 dependency really is down, the window is already full when warm-up ends and the circuit opens on the next failure.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 // ---cut---
 const pipeline = new ResiliencePipelineBuilder()
   .addCircuitBreaker({ consecutiveFailures: 3, breakDuration: '30s', warmUpDuration: '15s' })
@@ -172,12 +172,12 @@ every cold start. Save the limiter's state at the end of the run and restore it 
 between counts (tokens refill, windows expire, blocks run out).
 
 ```ts twoslash
-import type { TokenBucketStrategy } from 'resilience-pipeline';
+import type { TokenBucketStrategy } from '@nodelibraries/resilience';
 declare const kv: { get(key: string): Promise<string | null>; put(key: string, value: string): Promise<void> };
 declare function syncCustomer(id: string, signal: AbortSignal): Promise<void>;
 declare const customerIds: string[];
 // ---cut---
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const crm = new ResiliencePipelineBuilder({ name: 'crm', unrefTimers: true })
   .addRateLimiter({ tokenLimit: 100, replenishmentPeriod: '1m', queueTimeout: '1m' })
@@ -210,7 +210,7 @@ state and then spends it independently. Use a Redis-backed limiter for that ([mu
 ## `unrefTimers` for scripts and jobs
 
 ```ts twoslash
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 // ---cut---
 const pipeline = new ResiliencePipelineBuilder({ unrefTimers: true }).addRetry({ delay: '30s' }).addTimeout('10s').build();
 ```
@@ -230,7 +230,7 @@ interface LambdaContext { getRemainingTimeInMillis(): number }
 interface SQSEvent { Records: Array<{ messageId: string; body: string }> }
 declare function processOrder(body: string): Promise<void>;
 // ---cut---
-import { isTimeoutError, withTimeout } from 'resilience-pipeline';
+import { isTimeoutError, withTimeout } from '@nodelibraries/resilience';
 
 export const handler = async (event: SQSEvent, context: LambdaContext) => {
   const failures: Array<{ itemIdentifier: string }> = [];

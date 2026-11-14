@@ -1,5 +1,5 @@
 import { useState } from 'preact/hooks';
-import { type LockStore, type TimeProvider, MemoryLockStore, PipelineBuilder, getLockToken, lockStrategy } from 'resilience-pipeline';
+import { type LockStore, type TimeProvider, MemoryLockStore, PipelineBuilder, getLockToken, lockStrategy } from '@nodelibraries/resilience';
 import Range from './Range.tsx';
 import { fmtMs } from './sim.ts';
 import { type Lane, type Mark, type Seg, Timeline, sleepOn, useFakeRun } from './Timeline.tsx';

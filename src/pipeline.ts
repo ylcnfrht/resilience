@@ -262,6 +262,6 @@ function iterate<R>(source: AsyncIterable<R> | ReadableStream<R>): AsyncIterator
 }
 
 
-const streamAttempt = Symbol('resilience-pipeline.streamAttempt');
+const streamAttempt = Symbol('@nodelibraries/resilience.streamAttempt');
 type StreamAttempt<R> = { [streamAttempt]: true; first: IteratorResult<R>; it: AsyncIterator<R>; claimed: boolean; [discard]: () => unknown };
 const isStreamAttempt = <R>(value: unknown): value is StreamAttempt<R> => typeof value === 'object' && value !== null && streamAttempt in value;

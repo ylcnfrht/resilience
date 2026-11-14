@@ -4,7 +4,7 @@ import { type StatsSnapshot, createStats } from './stats.ts';
 export interface HystrixOptions {
   /** Pipeline names to report, one HystrixCommand each. */
   pipelines: string[];
-  /** Hystrix command group. Default 'resilience-pipeline'. */
+  /** Hystrix command group. Default '@nodelibraries/resilience'. */
   group?: string;
   /** Rolling window. Default 10 s (Hystrix's default). */
   window?: Duration;
@@ -41,7 +41,7 @@ export function createHystrixStream(options: HystrixOptions): HystrixStream {
   const time = options.timeProvider ?? unrefSystemTime;
   const windowMs = toMs(options.window ?? 10_000, 'window');
   const intervalMs = toMs(options.interval ?? 1000, 'interval');
-  const group = options.group ?? 'resilience-pipeline';
+  const group = options.group ?? '@nodelibraries/resilience';
   const stats = new Map(options.pipelines.map((name) => [name, createStats({ pipeline: name, window: windowMs, percentiles: PERCENTILES, timeProvider: time })]));
   const open = new Set<string>();
   // shortcut: one timestamp per circuit rejection in the window; switch to buckets if short-circuit rates get huge.

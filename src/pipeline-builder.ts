@@ -44,7 +44,7 @@ export interface ResiliencePipelineBuilderOptions {
  * The minimal builder: only the strategies you `add` end up in your bundle.
  *
  * ```ts
- * import { PipelineBuilder, retryStrategy, timeoutStrategy } from 'resilience-pipeline';
+ * import { PipelineBuilder, retryStrategy, timeoutStrategy } from '@nodelibraries/resilience';
  * const pipeline = new PipelineBuilder().add(retryStrategy({ maxRetryAttempts: 3 })).add(timeoutStrategy('2s')).build();
  * ```
  *

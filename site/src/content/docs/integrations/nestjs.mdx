@@ -7,17 +7,17 @@ sidebar:
 
 import { Aside } from '@astrojs/starlight/components';
 
-`resilience-pipeline/nestjs` adds a global `ResilienceModule` and method decorators for **providers**: the services, repositories and API clients that call your dependencies. A decorated method runs through its own pipeline; `@UsePipeline(name)` shares a named one (and its circuit breaker) between methods.
+`@nodelibraries/resilience/nestjs` adds a global `ResilienceModule` and method decorators for **providers**: the services, repositories and API clients that call your dependencies. A decorated method runs through its own pipeline; `@UsePipeline(name)` shares a named one (and its circuit breaker) between methods.
 
 ```sh
-npm i resilience-pipeline   # @nestjs/common and @nestjs/core >= 10 are optional peer dependencies
+npm i @nodelibraries/resilience   # @nestjs/common and @nestjs/core >= 10 are optional peer dependencies
 ```
 
 ## Setup
 
 ```ts title="app.module.ts"
 import { Module } from '@nestjs/common';
-import { ResilienceModule } from 'resilience-pipeline/nestjs';
+import { ResilienceModule } from '@nodelibraries/resilience/nestjs';
 
 @Module({
   imports: [
@@ -39,7 +39,7 @@ export class AppModule {}
 
 ```ts title="payment.service.ts"
 import { Injectable } from '@nestjs/common';
-import { Fallback, Retry, Timeout, UsePipeline, getResilienceSignal } from 'resilience-pipeline/nestjs';
+import { Fallback, Retry, Timeout, UsePipeline, getResilienceSignal } from '@nodelibraries/resilience/nestjs';
 
 @Injectable()
 export class PaymentService {
@@ -117,7 +117,7 @@ async getExchangeRates() { … }
 
 ## Signals inside a method
 
-`getResilienceSignal()` and `getResilienceContext()` (re-exported from `resilience-pipeline/nestjs`) return the current execution's signal and context, through `AsyncLocalStorage`. Pass the signal to `fetch`, your HTTP client or your database driver, or timeouts and hedging can't stop the work. The context has `attemptNumber`, useful for logs or per-attempt idempotency keys.
+`getResilienceSignal()` and `getResilienceContext()` (re-exported from `@nodelibraries/resilience/nestjs`) return the current execution's signal and context, through `AsyncLocalStorage`. Pass the signal to `fetch`, your HTTP client or your database driver, or timeouts and hedging can't stop the work. The context has `attemptNumber`, useful for logs or per-attempt idempotency keys.
 
 ## Using the registry directly
 
@@ -125,7 +125,7 @@ async getExchangeRates() { … }
 
 ```ts
 import { Injectable } from '@nestjs/common';
-import { ResiliencePipelineRegistry } from 'resilience-pipeline';
+import { ResiliencePipelineRegistry } from '@nodelibraries/resilience';
 
 @Injectable()
 export class InventoryClient {
@@ -148,7 +148,7 @@ A rejection (open circuit, timeout, full bulkhead) reaches Nest as an unknown ex
 ```ts title="resilience-exception.filter.ts"
 import { type ArgumentsHost, Catch } from '@nestjs/common';
 import { BaseExceptionFilter } from '@nestjs/core';
-import { describeResilienceError } from 'resilience-pipeline/http';
+import { describeResilienceError } from '@nodelibraries/resilience/http';
 
 @Catch()
 export class ResilienceExceptionFilter extends BaseExceptionFilter {
@@ -168,7 +168,7 @@ const { httpAdapter } = app.get(HttpAdapterHost);
 app.useGlobalFilters(new ResilienceExceptionFilter(httpAdapter));
 ```
 
-For a request deadline that propagates into your decorated services, add the inbound middleware too. With the Express adapter: `app.use(resilienceMiddleware({ timeout: '5s' }))` from `resilience-pipeline/http` ([details](/integrations/express-and-hono/)).
+For a request deadline that propagates into your decorated services, add the inbound middleware too. With the Express adapter: `app.use(resilienceMiddleware({ timeout: '5s' }))` from `@nodelibraries/resilience/http` ([details](/integrations/express-and-hono/)).
 
 ## `@nestjs/resilience`
 
@@ -176,7 +176,7 @@ The Nest team publishes [`@nestjs/resilience`](https://github.com/nestjs/resilie
 
 This package puts its decorators on **provider methods**, works with Nest 10 and later, and brings the full strategy set (hedging, adaptive concurrency, sliding-window and Redis-backed rate limits, cache, lock, chaos), typed errors, and OpenTelemetry/Prometheus export.
 
-The two can be combined: `@nestjs/resilience` at the edge of a route, `resilience-pipeline` in the services and clients underneath. Both export a class named `ResilienceModule`, so alias one of them on import. A migration guide is at [Migrating from @nestjs/resilience](/migration/nestjs-resilience/).
+The two can be combined: `@nestjs/resilience` at the edge of a route, `@nodelibraries/resilience` in the services and clients underneath. Both export a class named `ResilienceModule`, so alias one of them on import. A migration guide is at [Migrating from @nestjs/resilience](/migration/nestjs-resilience/).
 
 <Aside type="caution">
 If you register pipelines as your own providers instead of through the module, don't give them `Scope.REQUEST`. A new pipeline per request means a new circuit breaker and new limiters per request: they never see enough traffic to act.

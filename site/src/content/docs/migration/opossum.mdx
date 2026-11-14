@@ -1,6 +1,6 @@
 ---
 title: From opossum
-description: Move an opossum CircuitBreaker (timeout, fallback, capacity, cache, health check, events) to a resilience-pipeline, with the defaults that differ.
+description: Move an opossum CircuitBreaker (timeout, fallback, capacity, cache, health check, events) to a @nodelibraries/resilience, with the defaults that differ.
 sidebar:
   order: 3
 ---
@@ -13,7 +13,7 @@ opossum is one object that bundles a circuit breaker, a timeout, a concurrency c
 
 ## Concept mapping
 
-| opossum 10 | resilience-pipeline |
+| opossum 10 | @nodelibraries/resilience |
 |---|---|
 | `new CircuitBreaker(fn, options)` + `breaker.fire(a, b)` | `builder.addCircuitBreaker(…).build()` + `pipeline.execute(() => fn(a, b))` |
 | `fire` with the action's arguments | `const call = pipeline.wrap(fn)`; `call(a, b)` |
@@ -39,12 +39,12 @@ opossum is one object that bundles a circuit breaker, a timeout, a concurrency c
 | `breaker.toJSON()` + `{ state }` option | `stateProvider.snapshot()` + `initialState` |
 | `breaker.stats` | `createStats()`, or `stateProvider.metrics` for the breaker window |
 | `name`, `group` | builder `name`, `tags: { group: '…' }` |
-| `opossum-prometheus` | `instrumentPrometheus()` from `resilience-pipeline/prometheus` |
-| `opossum-hystrix` | `createHystrixStream()` from `resilience-pipeline/hystrix` |
+| `opossum-prometheus` | `instrumentPrometheus()` from `@nodelibraries/resilience/prometheus` |
+| `opossum-hystrix` | `createHystrixStream()` from `@nodelibraries/resilience/hystrix` |
 
 ### Events
 
-| opossum event | resilience-pipeline |
+| opossum event | @nodelibraries/resilience |
 |---|---|
 | `fire` | telemetry `OnPipelineExecuting` |
 | `success` / `failure` | telemetry `OnStrategyExecuted` (`args.outcome.ok`) |
@@ -89,7 +89,7 @@ const price = await breaker.fire(productId);
 ```
 
 </TabItem>
-<TabItem label="resilience-pipeline">
+<TabItem label="@nodelibraries/resilience">
 
 ```ts twoslash
 declare function getPrice(productId: string, signal: AbortSignal): Promise<number>;
@@ -97,7 +97,7 @@ declare const cachedPrice: number;
 declare const productId: string;
 declare const log: { warn(msg: string): void };
 // ---cut---
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const pipeline = new ResiliencePipelineBuilder<number>({ name: 'prices' })
   .addFallback({ fallbackValue: cachedPrice })
@@ -130,13 +130,13 @@ await breaker.fire(to, subject, body);
 ```
 
 </TabItem>
-<TabItem label="resilience-pipeline">
+<TabItem label="@nodelibraries/resilience">
 
 ```ts twoslash
 declare function sendEmail(to: string, subject: string, body: string): Promise<void>;
 declare const to: string, subject: string, body: string;
 // ---cut---
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const pipeline = new ResiliencePipelineBuilder().addCircuitBreaker().addTimeout('5s').build();
 const send = pipeline.wrap(sendEmail);
@@ -166,7 +166,7 @@ const user = await breaker.fire(id);
 ```
 
 </TabItem>
-<TabItem label="resilience-pipeline">
+<TabItem label="@nodelibraries/resilience">
 
 ```ts twoslash
 type User = { id: string };
@@ -174,7 +174,7 @@ declare function getUser(id: string): Promise<User>;
 declare const db: { ping(): Promise<void> };
 declare const id: string;
 // ---cut---
-import { ResiliencePipelineBuilder, circuitHealthCheck } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder, circuitHealthCheck } from '@nodelibraries/resilience';
 
 const pipeline = new ResiliencePipelineBuilder<User>()
   .addCache({ ttl: '1m' }) // keyed by operationKey
@@ -201,14 +201,14 @@ process.on('SIGTERM', () => save(breaker.toJSON()));
 ```
 
 </TabItem>
-<TabItem label="resilience-pipeline">
+<TabItem label="@nodelibraries/resilience">
 
 ```ts twoslash
-import type { CircuitSnapshot } from 'resilience-pipeline';
+import type { CircuitSnapshot } from '@nodelibraries/resilience';
 declare const saved: CircuitSnapshot | undefined;
 declare function save(state: CircuitSnapshot): void;
 // ---cut---
-import { CircuitBreakerStateProvider, ResiliencePipelineBuilder } from 'resilience-pipeline';
+import { CircuitBreakerStateProvider, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
 
 const state = new CircuitBreakerStateProvider();
 const pipeline = new ResiliencePipelineBuilder()

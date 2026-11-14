@@ -81,7 +81,7 @@ class ResilienceExplorer {
         if (!list) continue;
         const label = `${proto.constructor.name}.${name}`;
         // Request-scoped instances are created per request, after this runs: refuse rather than silently not wrap.
-        if (!wrapper.isDependencyTreeStatic()) throw new Error(`resilience-pipeline: ${label} is request-scoped; resilience decorators need a singleton`);
+        if (!wrapper.isDependencyTreeStatic()) throw new Error(`@nodelibraries/resilience: ${label} is request-scoped; resilience decorators need a singleton`);
         const builder = new ResiliencePipelineBuilder({ name: label });
         for (const step of list) step(builder, this.#registry);
         const pipeline = builder.build();

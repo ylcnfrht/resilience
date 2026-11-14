@@ -45,7 +45,7 @@ The status check is duck-typed, so it works with fetch wrappers, axios errors, a
 own error with a `status` property and the defaults apply:
 
 ```ts twoslash
-import { retry } from 'resilience-pipeline';
+import { retry } from '@nodelibraries/resilience';
 // ---cut---
 class HttpError extends Error {
   constructor(readonly status: number) {
@@ -72,7 +72,7 @@ await retry(async ({ signal }) => {
 alone about aborts and client errors too.
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, PredicateBuilder } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder, PredicateBuilder } from '@nodelibraries/resilience';
 class DbError extends Error {
   constructor(readonly code: string) { super(code); }
 }
@@ -98,7 +98,7 @@ The clauses are OR-ed. A function predicate receives `{ outcome, context }` (ret
 async. To extend the default instead of replacing it, call it:
 
 ```ts twoslash
-import { ResiliencePipelineBuilder, defaultShouldHandle } from 'resilience-pipeline';
+import { ResiliencePipelineBuilder, defaultShouldHandle } from '@nodelibraries/resilience';
 // ---cut---
 const pipeline = new ResiliencePipelineBuilder<Response>()
   .addRetry({
@@ -120,7 +120,7 @@ Throw `NonRetryableError` from the callback to stop retrying immediately. The pi
 receives the original error:
 
 ```ts twoslash
-import { retry, NonRetryableError } from 'resilience-pipeline';
+import { retry, NonRetryableError } from '@nodelibraries/resilience';
 declare function charge(): Promise<{ declined: boolean; reason: string }>;
 // ---cut---
 await retry(async () => {

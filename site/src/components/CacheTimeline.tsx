@@ -1,5 +1,5 @@
 import { useState } from 'preact/hooks';
-import { type CacheStore, MemoryCacheStore, PipelineBuilder, cacheStrategy } from 'resilience-pipeline';
+import { type CacheStore, MemoryCacheStore, PipelineBuilder, cacheStrategy } from '@nodelibraries/resilience';
 import Range from './Range.tsx';
 import { fmtMs } from './sim.ts';
 import { type Kind, type Lane, type Seg, Timeline, pack, sleepOn, useFakeRun } from './Timeline.tsx';

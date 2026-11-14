@@ -7,7 +7,7 @@ sidebar:
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-In-memory state is per process. With ten instances behind a load balancer you get ten caches, ten "global" rate limits and ten circuit breakers that each have to learn on their own that a dependency is down. `resilience-pipeline/redis` moves that state to Redis:
+In-memory state is per process. With ten instances behind a load balancer you get ten caches, ten "global" rate limits and ten circuit breakers that each have to learn on their own that a dependency is down. `@nodelibraries/resilience/redis` moves that state to Redis:
 
 | Class | Plugs into | Gives you |
 |---|---|---|
@@ -32,7 +32,7 @@ const redis = new Redis(process.env.REDIS_URL!); // works as is
 <TabItem label="node-redis">
 ```ts
 import { createClient } from 'redis';
-import { fromNodeRedis } from 'resilience-pipeline/redis';
+import { fromNodeRedis } from '@nodelibraries/resilience/redis';
 
 const client = createClient({ url: process.env.REDIS_URL });
 await client.connect();
@@ -42,7 +42,7 @@ const redis = fromNodeRedis(client); // node-redis v4+: eval(script, { keys, arg
 <TabItem label="ioredis Cluster">
 ```ts
 import { Cluster } from 'ioredis';
-import type { RedisClient } from 'resilience-pipeline/redis';
+import type { RedisClient } from '@nodelibraries/resilience/redis';
 
 const cluster = new Cluster([{ host: '10.0.0.1', port: 6379 }, { host: '10.0.0.2', port: 6379 }]);
 const redis = cluster as unknown as RedisClient;
@@ -57,12 +57,12 @@ Every class takes `{ client, prefix? }`. `prefix` defaults to `'rp:'` and is pre
 ## Cache
 
 ```ts twoslash
-import type { RedisClient } from 'resilience-pipeline/redis';
+import type { RedisClient } from '@nodelibraries/resilience/redis';
 declare const redis: RedisClient;
 declare function loadProduct(id: string, signal: AbortSignal): Promise<{ id: string; price: number }>;
 // ---cut---
-import { ResiliencePipelineBuilder } from 'resilience-pipeline';
-import { RedisCacheStore } from 'resilience-pipeline/redis';
+import { ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { RedisCacheStore } from '@nodelibraries/resilience/redis';
 
 const products = new ResiliencePipelineBuilder<{ id: string; price: number }>({ name: 'products' })
   .addCache({ ttl: '5m', staleTtl: '1h', store: new RedisCacheStore({ client: redis }) })
@@ -77,12 +77,12 @@ Entries are stored as JSON with `SET … PX`, so they expire natively after `ttl
 ## Lock
 
 ```ts twoslash
-import type { RedisClient } from 'resilience-pipeline/redis';
+import type { RedisClient } from '@nodelibraries/resilience/redis';
 declare const redis: RedisClient;
 declare function buildReport(fencingToken: number | undefined, signal: AbortSignal): Promise<void>;
 // ---cut---
-import { ResiliencePipelineBuilder, getLockToken } from 'resilience-pipeline';
-import { RedisLockStore } from 'resilience-pipeline/redis';
+import { ResiliencePipelineBuilder, getLockToken } from '@nodelibraries/resilience';
+import { RedisLockStore } from '@nodelibraries/resilience/redis';
 
 const nightly = new ResiliencePipelineBuilder({ name: 'nightly-report' })
   .addLock({ key: () => 'nightly-report', store: new RedisLockStore({ client: redis }), ttl: '30s' })
@@ -104,11 +104,11 @@ Redis replication is asynchronous. After a failover, a lease or counter incremen
 `RedisRateLimiter` is a segmented sliding window (the same algorithm as the in-memory sliding window limiter) stored in a Redis hash. It runs on the **Redis server's clock** (`TIME`), so instances with skewed clocks still agree on the window. Run it with `RateLimiterStrategy`, which adds waiting, queueing and the other [rate limiter options](/strategies/rate-limiting/):
 
 ```ts twoslash
-import type { RedisClient } from 'resilience-pipeline/redis';
+import type { RedisClient } from '@nodelibraries/resilience/redis';
 declare const redis: RedisClient;
 // ---cut---
-import { RateLimiterStrategy, ResiliencePipelineBuilder } from 'resilience-pipeline';
-import { RedisRateLimiter, redisPartitionLimiter } from 'resilience-pipeline/redis';
+import { RateLimiterStrategy, ResiliencePipelineBuilder } from '@nodelibraries/resilience';
+import { RedisRateLimiter, redisPartitionLimiter } from '@nodelibraries/resilience/redis';
 
 // 100 calls per minute to a partner API, across all instances.
 const partner = new ResiliencePipelineBuilder({ name: 'partner-api' })
@@ -144,11 +144,11 @@ A rejection carries `retryAfter`: the time until enough old segments leave the w
 ## Shared circuit state
 
 ```ts twoslash
-import type { RedisClient } from 'resilience-pipeline/redis';
+import type { RedisClient } from '@nodelibraries/resilience/redis';
 declare const redis: RedisClient;
 // ---cut---
-import { ResiliencePipelineBuilder, sharedCircuitState } from 'resilience-pipeline';
-import { RedisCircuitStateStore } from 'resilience-pipeline/redis';
+import { ResiliencePipelineBuilder, sharedCircuitState } from '@nodelibraries/resilience';
+import { RedisCircuitStateStore } from '@nodelibraries/resilience/redis';
 
 const payments = new ResiliencePipelineBuilder({ name: 'payments' })
   .addCircuitBreaker({

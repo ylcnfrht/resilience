@@ -193,7 +193,7 @@ test('hystrix: default clock and interval, ignores other pipelines, closes the c
     assert.equal(stream.commands()[0]!.isCircuitBreakerOpen, true);
     await manualControl.close();
     assert.equal(stream.commands()[0]!.isCircuitBreakerOpen, false);
-    assert.equal(stream.commands()[0]!.group, 'resilience-pipeline');
+    assert.equal(stream.commands()[0]!.group, '@nodelibraries/resilience');
     assert.equal(stream.commands()[0]!.propertyValue_metricsRollingStatisticalWindowInMilliseconds, 10_000);
     p.dispose();
   } finally {

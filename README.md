@@ -28,13 +28,13 @@ npm i @ylcnfrht/resilience
 import { ResiliencePipelineBuilder } from '@ylcnfrht/resilience';
 
 const payments = new ResiliencePipelineBuilder({ name: 'payments' })
-  .addFallback({ fallbackAction: () => queueForLater() })
+  .addFallback({ fallbackAction: () => queueForLater(order) }) // same order.id key: the charge may already have gone through
   .addRetry({ maxRetryAttempts: 3, backoffType: 'exponential', useJitter: 'full' })
   .addCircuitBreaker({ failureRatio: 0.5, minimumThroughput: 20 })
   .addTimeout('2s')
   .build();
 
-const receipt = await payments.execute(({ signal }) => charge(order, { signal }));
+const receipt = await payments.execute(({ signal }) => charge(order, { signal, idempotencyKey: order.id }));
 ```
 
 Strategies run in the order you add them, the first one outermost: here every retry attempt gets its own 2 s timeout and passes the circuit breaker, and if everything fails the fallback answers. Pass `signal` to your I/O: timeouts, hedging and caller cancellation all work by aborting it.
